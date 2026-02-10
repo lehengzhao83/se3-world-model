@@ -1,0 +1,79 @@
+[project]
+name = "se3-world-model"
+version = "0.1.0"
+description = "SE(3) Equivariant World Model with Hybrid Dynamics"
+requires-python = ">=3.12"
+
+[tool.pyright]
+pythonVersion = "3.12"
+pythonPlatform = "Linux"
+typeCheckingMode = "strict"
+exclude = []
+reportMissingImports = true
+reportUnusedImport = "none"
+reportUnknownArgumentType = "none"
+reportUnknownVariableType = "none"
+reportUnknownMemberType = "none"
+reportUnknownParameterType = "none"
+reportMissingTypeArgument = "none"
+reportMissingParameterType = "none"
+reportMissingTypeStubs = "none"
+reportDeprecated = "error"
+reportUnknownLambdaType = "warning"
+reportUnnecessaryComparison = "warning"
+reportAttributeAccessIssue = "error"
+reportIncompatibleMethodOverride = true
+reportIncompatibleVariableOverride = "warning"
+strictListInference = false
+strictSetInference = false
+strictDictionaryInference = false
+deprecateTypingAliases = true
+disableBytesTypePromotions = true
+reportPropertyTypeMismatch = "error"
+reportFunctionMemberAccess = "error"
+reportImportCycles = false
+reportUnusedClass = true
+reportUnusedFunction = "warning"
+reportUnusedVariable = "warning"
+reportDuplicateImport = "warning"
+reportWildcardImportFromLibrary = "warning"
+reportUntypedFunctionDecorator = "warning"
+reportUntypedClassDecorator = "warning"
+reportUntypedBaseClass = "warning"
+reportUntypedNamedTuple = "warning"
+reportPrivateUsage = "none"
+reportConstantRedefinition = "warning"
+reportInconsistentConstructor = "warning"
+reportMissingSuperCall = "warning"
+reportUnnecessaryTypeIgnoreComment = "warning"
+reportImplicitOverride = "none"
+reportUnusedExpression = "warning"
+reportMatchNotExhaustive = "warning"
+
+[tool.ruff]
+target-version = "py312"
+preview = true
+exclude = ["third_party", "assets", "data"]
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+  "F", "E", "W", "I", "UP", "B", "C4", "EXE", "G", "SIM", "NPY", "PERF",
+  "PGH004", "PIE794", "PIE800", "PIE804", "PIE807", "PIE810", "PLC0131",
+  "PLC0132", "PLC0205", "PLE", "PLR0133", "PLR0206", "PLR1722", "PLW0129",
+  "PLW0406", "PLW0711", "PLW1509", "PLW3301", "PT006", "PT022", "PT023",
+  "PT024", "PT025", "PT026", "PYI", "TRY203", "RUF008", "RUF009", "RUF013",
+  "RUF015", "RUF016", "RUF017"
+]
+ignore = [
+  "UP007", "UP037", "UP035", "EXE002", "SIM105", "B009", "B010", "NPY002",
+  "E741", "UP046", "UP047"
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+"*.pyi" = ["F821", "E501", "PYI001", "PYI021", "PYI029", "PYI032", "PYI054"]
+
+[tool.ruff.format]
+line-ending = "lf"
+docstring-code-format = true
