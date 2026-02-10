@@ -30,7 +30,9 @@ jobs:
       run: pyright .
       
     - name: Run Tests
-      # 关键修改：PYTHONPATH=src 告诉 python 去 src 目录下找包
+      # 修复核心：
+      # 1. export PYTHONPATH=src 让 Python 能找到 se3_world_model
+      # 2. 确保 tests 目录包含 __init__.py (见文件结构部分)
       run: |
         export PYTHONPATH=$PYTHONPATH:src
-        python -m unittest discover tests
+        python -m unittest discover -s tests -p "test_*.py"
