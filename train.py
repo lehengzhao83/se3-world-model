@@ -121,18 +121,21 @@ def train(
             total_loss += loss.item()
 
             # 只在主进程打印日志，避免刷屏
+            # 修正点：epoch + 1 增加空格
             if global_rank == 0 and batch_idx % 10 == 0:
-                print(f"[GPU 0] Epoch [{epoch+1}/{epochs}] Step [{batch_idx}/{len(dataloader)}] "
+                print(f"[GPU 0] Epoch [{epoch + 1}/{epochs}] Step [{batch_idx}/{len(dataloader)}] "
                       f"Loss: {loss.item():.6f}")
 
         # 计算平均 Loss (这里只打印 Rank 0 的 Loss 作为参考)
         avg_loss = total_loss / len(dataloader)
 
         if global_rank == 0:
-            print(f"=== Epoch [{epoch+1}/{epochs}] Average Loss: {avg_loss:.6f} ===")
+            # 修正点：epoch + 1 增加空格
+            print(f"=== Epoch [{epoch + 1}/{epochs}] Average Loss: {avg_loss:.6f} ===")
             # 只在主进程保存模型
             # 注意：保存 model.module 而不是 model 本身，因为 model 被 DDP 包裹了
-            torch.save(model.module.state_dict(), os.path.join(save_dir, f"model_epoch_{epoch+1}.pth"))
+            # 修正点：epoch + 1 增加空格
+            torch.save(model.module.state_dict(), os.path.join(save_dir, f"model_epoch_{epoch + 1}.pth"))
 
     if global_rank == 0:
         print("训练完成。")
