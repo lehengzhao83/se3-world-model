@@ -1,9 +1,8 @@
-import os
-import sys
 import numpy as np
 import sapien.core as sapien
 import torch
 from tqdm import tqdm
+
 
 def sample_capsule_points(r: float, l: float, n: int) -> np.ndarray:
     """在胶囊体表面/内部均匀采样点云"""
@@ -12,7 +11,7 @@ def sample_capsule_points(r: float, l: float, n: int) -> np.ndarray:
         # 在包围盒内采样: [-l-r, l+r] x [-r, r] x [-r, r]
         # SAPIEN 胶囊默认沿 X 轴
         pt = np.random.uniform(low=[-l - r, -r, -r], high=[l + r, r, r])
-        
+
         # 判断是否在胶囊内
         px = pt[0]
         if px < -l:
@@ -21,15 +20,16 @@ def sample_capsule_points(r: float, l: float, n: int) -> np.ndarray:
             dist = np.linalg.norm(pt - np.array([l, 0, 0]))
         else:
             dist = np.linalg.norm(pt[1:])
-        
+
         if dist <= r:
             points.append(pt)
-    
+
     return np.array(points, dtype=np.float32)
+
 
 def generate_dataset(num_samples=10000, save_path="data/sapien_train.pt"):
     print(f"正在初始化 SAPIEN 引擎，准备生成 {num_samples} 条数据...")
-    
+
     # 初始化 SAPIEN (无渲染模式，纯物理)
     engine = sapien.Engine()
     scene = engine.create_scene()
@@ -48,7 +48,11 @@ def generate_dataset(num_samples=10000, save_path="data/sapien_train.pt"):
     # 创建一个用于模拟的动态物体
     builder = scene.create_actor_builder()
     builder.add_capsule_collision(radius=0.1, half_length=0.2)
-    builder.set_mass_and_inertia(mass=1.0, mass_center=[0,0,0], inertia=[0.1, 0.1, 0.1])
+    builder.set_mass_and_inertia(
+        mass=1.0, 
+        mass_center=[0, 0, 0], 
+        inertia=[0.1, 0.1, 0.1]
+    )
     actor = builder.build(name="dynamic_object")
 
     # 开始循环生成
@@ -61,7 +65,7 @@ def generate_dataset(num_samples=10000, save_path="data/sapien_train.pt"):
         scene.set_gravity(gravity)
 
         # 隐式力：风力 (随机向量，不可见，作为 Context 输入)
-        wind = np.random.randn(3) * 2.0 
+        wind = np.random.randn(3) * 2.0
 
         # 2. 重置物体状态
         # 随机位置和姿态
@@ -69,7 +73,7 @@ def generate_dataset(num_samples=10000, save_path="data/sapien_train.pt"):
         q = np.random.randn(4)
         q /= np.linalg.norm(q)
         actor.set_pose(sapien.Pose(pos, q))
-        
+
         # 随机初速度
         actor.set_velocity(np.random.randn(3) * 0.5)
         actor.set_angular_velocity(np.random.randn(3) * 0.5)
@@ -83,7 +87,7 @@ def generate_dataset(num_samples=10000, save_path="data/sapien_train.pt"):
         # 4. 物理模拟 (t -> t+1)
         # 模拟 5 个物理步长
         for _ in range(5):
-            actor.add_force_accum(wind) # 施加风力
+            actor.add_force_accum(wind)  # 施加风力
             scene.step()
 
         # 5. 获取 t+1 时刻状态 (Target)
@@ -93,7 +97,7 @@ def generate_dataset(num_samples=10000, save_path="data/sapien_train.pt"):
 
         # 6. 收集数据
         all_x_t.append(pts_t)
-        all_explicit.append(gravity.reshape(1, 3)) # Explicit: [1, 3]
+        all_explicit.append(gravity.reshape(1, 3))  # Explicit: [1, 3]
         all_context.append(wind)                   # Implicit: [3]
         all_x_next.append(pts_next)
 
@@ -104,10 +108,11 @@ def generate_dataset(num_samples=10000, save_path="data/sapien_train.pt"):
         "context": torch.tensor(np.array(all_context), dtype=torch.float32),
         "x_next": torch.tensor(np.array(all_x_next), dtype=torch.float32)
     }
-    
+
     print(f"保存数据到 {save_path} ...")
     torch.save(data_dict, save_path)
     print("完成！")
+
 
 if __name__ == "__main__":
     # 生成训练集 (10000条)
