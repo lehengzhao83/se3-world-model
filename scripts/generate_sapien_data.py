@@ -27,7 +27,7 @@ def sample_capsule_points(r: float, l: float, n: int) -> np.ndarray:
     return np.array(points, dtype=np.float32)
 
 
-def generate_dataset(num_samples=10000, save_path="data/sapien_train.pt"):
+def generate_dataset(num_samples: int = 10000, save_path: str = "data/sapien_train.pt") -> None:
     print(f"正在初始化 SAPIEN 引擎，准备生成 {num_samples} 条数据...")
 
     # 初始化 SAPIEN (无渲染模式，纯物理)
@@ -49,8 +49,8 @@ def generate_dataset(num_samples=10000, save_path="data/sapien_train.pt"):
     builder = scene.create_actor_builder()
     builder.add_capsule_collision(radius=0.1, half_length=0.2)
     builder.set_mass_and_inertia(
-        mass=1.0, 
-        mass_center=[0, 0, 0], 
+        mass=1.0,
+        mass_center=[0, 0, 0],
         inertia=[0.1, 0.1, 0.1]
     )
     actor = builder.build(name="dynamic_object")
