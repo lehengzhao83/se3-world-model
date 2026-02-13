@@ -1,5 +1,4 @@
 ---
-
 # SE(3) World Model 部署与运行指南
 
 本指南基于 **Alibaba Cloud / Ubuntu (dnf/apt 环境)** 且配备 **NVIDIA GPU (如 8x RTX 4090)** 的服务器环境编写。
