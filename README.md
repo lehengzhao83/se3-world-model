@@ -29,7 +29,7 @@ source ~/.bashrc
 # 2. 创建并激活 Python 3.10 环境
 conda create -n se3 python=3.10 -y
 conda activate se3
-
+cd se3-world-model
 ```
 
 ## 3. 安装 Python 依赖
