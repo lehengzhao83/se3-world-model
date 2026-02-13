@@ -6,12 +6,12 @@ from se3_world_model.layers import VNLinear, VNResBlock
 
 class SE3Encoder(nn.Module):
     """
-    Encodes Point Cloud [B, N, 3] -> Global Latent State [B, Latent, 3].
-    Uses Point-wise VN layers followed by Mean Pooling.
+    Encodes Point Cloud [B, N, C, 3] -> Global Latent State [B, Latent, 3].
+    C=1 for just position, C=2 for position + velocity.
     """
     def __init__(self, in_channels: int, latent_dim: int) -> None:
         super().__init__()
-        # Lift raw points (1 channel) to high-dim vector features
+        # Lift raw points (C channels) to high-dim vector features
         self.lift = VNLinear(in_channels, latent_dim)
 
         self.backbone = nn.Sequential(
@@ -22,12 +22,16 @@ class SE3Encoder(nn.Module):
         self.pre_pool = VNLinear(latent_dim, latent_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [B, N, 3]
-        B, N, _ = x.shape
-
-        # Flatten B and N to treat points as independent samples initially
-        # Input becomes [B*N, 1, 3] -> 1 feature per point (its position)
-        x_flat = x.view(-1, 1, 3)
+        # x: [B, N, 3] (Old) or [B, N, C, 3] (New)
+        if x.ndim == 3:
+            # Case: [B, N, 3] -> 1 channel
+            B, N, _ = x.shape
+            x_flat = x.view(-1, 1, 3)
+        else:
+            # Case: [B, N, C, 3]
+            B, N, _, _ = x.shape
+            # Flatten B and N: [B*N, C, 3]
+            x_flat = x.view(B * N, -1, 3)
 
         # Feature Extraction
         feat: torch.Tensor = self.lift(x_flat)  # [B*N, Latent, 3]
