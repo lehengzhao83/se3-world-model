@@ -16,14 +16,13 @@ class SE3WorldModel(nn.Module):
     ) -> None:
         super().__init__()
 
-        # 1. Encoder (Raw points in, Latent state out)
-        # in_channels=1 because input is raw xyz
-        self.encoder = SE3Encoder(in_channels=1, latent_dim=latent_dim)
+        # 1. Encoder
+        # in_channels=2: Channel 0 = Position, Channel 1 = Velocity
+        self.encoder = SE3Encoder(in_channels=2, latent_dim=latent_dim)
 
         # 2. Dynamics (Hybrid)
 
         # Step A: Explicit Global Vectors (Gravity)
-        # Input projection accommodates latent state + global vectors
         self.dyn_input = VNLinear(latent_dim + num_global_vectors, latent_dim)
 
         # Step B: Main Backbone (Pure SE(3) Physics)
@@ -34,35 +33,38 @@ class SE3WorldModel(nn.Module):
         )
 
         # Step C: Implicit Data-Driven Fields
-        # Adapter to learn non-equivariant forces from context
         self.context_adapter = ContextualForceGenerator(context_dim, hidden_dim=64)
 
-        # Step D: Fusion (Backbone + Learned Force)
-        # latent_dim (state) + 1 (force vector) -> latent_dim
+        # Step D: Fusion
         self.dyn_fusion = VNLinear(latent_dim + 1, latent_dim)
 
-        # 3. Decoder (Latent state out, Point Cloud out)
+        # 3. Decoder
+        # Output is delta_x (displacement), not absolute position
         self.decoder = SE3Decoder(latent_dim, num_points)
 
     def forward(
         self,
         x: torch.Tensor,
+        v: torch.Tensor,  # New Input: Velocity
         explicit_vectors: torch.Tensor,
         implicit_context: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
-            x: [B, N, 3] Input Point Cloud.
-            explicit_vectors: [B, M, 3] Known vectors (Gravity/Wind) in Body Frame.
-            implicit_context: [B, K] Unknown params (Position/Time) for data-driven adaptation.
+            x: [B, N, 3] Input Point Cloud (Position).
+            v: [B, N, 3] Input Point Cloud (Velocity).
+            explicit_vectors: [B, M, 3] Known vectors.
+            implicit_context: [B, K] Unknown params.
 
         Returns:
-            pred_x: [B, N, 3] Predicted Next Point Cloud.
-            z_next: [B, Latent, 3] Predicted Latent State.
+            pred_x: [B, N, 3] Predicted Next Position.
+            z_next: [B, Latent, 3] Latent State.
         """
 
         # 1. Encode
-        z = self.encoder(x)  # [B, Latent, 3]
+        # Stack Position and Velocity: [B, N, 2, 3]
+        x_in = torch.stack([x, v], dim=2)
+        z = self.encoder(x_in)  # [B, Latent, 3]
 
         # 2. Dynamics
 
@@ -70,17 +72,21 @@ class SE3WorldModel(nn.Module):
         z_aug = inject_global_vectors(z, explicit_vectors)
         z_curr: torch.Tensor = self.dyn_input(z_aug)
 
-        # B. Evolve State (Equivariant)
+        # B. Evolve State
         z_pred_raw: torch.Tensor = self.dyn_backbone(z_curr)
 
-        # C. Inject Implicit Forces (Data-driven Residual)
-        correction_force = self.context_adapter(implicit_context)  # [B, 1, 3]
+        # C. Inject Implicit Forces
+        correction_force = self.context_adapter(implicit_context)
 
         # D. Fuse Correction
         z_combined = torch.cat([z_pred_raw, correction_force], dim=1)
         z_next: torch.Tensor = self.dyn_fusion(z_combined)
 
-        # 3. Decode
-        pred_x = self.decoder(z_next)  # [B, N, 3]
+        # 3. Decode -> Displacement
+        delta_x = self.decoder(z_next)  # [B, N, 3]
+
+        # 4. Residual Connection (Physics Integration)
+        # x_{t+1} = x_t + delta_x
+        pred_x = x + delta_x
 
         return pred_x, z_next
