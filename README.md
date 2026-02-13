@@ -89,12 +89,4 @@ python evaluate.py
 
 ---
 
-### 💡 实用小工具
-
-如果你需要将生成的评估图下载到本地查看（以 Windows/Mac 本地终端为例）：
-
-```bash
-# 替换 zlhll@10.0.67.74 为你的服务器 IP
-scp -o ProxyJump=zlhll@101.132.77.141 zlhll@10.0.67.74:~/se3-world-model/eval_result.png ~/Desktop/
-
 ```
