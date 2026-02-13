@@ -84,9 +84,6 @@ python evaluate.py
 
 ```
 
-*结果将保存为 `eval_result.png`。*
-
-
----
+*结果将保存为 `eval_result.png`。
 
 ```
