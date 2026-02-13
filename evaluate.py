@@ -13,7 +13,7 @@ def evaluate(checkpoint_path, data_path="data/sapien_val.pt"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Loading validation data from {data_path}...")
     
-    # 1. 加载验证集
+    # 1. 加载验证集 (Dataset 已经修改为返回 v_t)
     dataset = SapienDataset(data_path=data_path)
     dataloader = DataLoader(dataset, batch_size=32, shuffle=False)
     
@@ -26,27 +26,32 @@ def evaluate(checkpoint_path, data_path="data/sapien_val.pt"):
         context_dim=3
     ).to(device)
     
-    # 加载权重 (注意：因为训练时用了 DDP，权重键值可能有 'module.' 前缀，需要处理)
+    # 加载权重
     state_dict = torch.load(checkpoint_path, map_location=device)
-    # 去除 'module.' 前缀
+    # 去除 DDP 的 'module.' 前缀
     new_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
     model.load_state_dict(new_state_dict)
     model.eval()
     
     # 3. 推理与计算误差
     total_mse = 0.0
-    all_preds = []
-    all_targets = []
+    
+    # 用于可视化的数据
+    vis_input = None
+    vis_target = None
+    vis_pred = None
     
     with torch.no_grad():
-        for i, (x_t, explicit, context, x_next) in enumerate(dataloader):
+        # 修改点：解包增加 v_t
+        for i, (x_t, v_t, explicit, context, x_next) in enumerate(dataloader):
             x_t = x_t.to(device)
+            v_t = v_t.to(device) # 新增：移动速度到 GPU
             explicit = explicit.to(device)
             context = context.to(device)
             x_next = x_next.to(device)
             
-            # 预测
-            pred_next, _ = model(x_t, explicit, context)
+            # 修改点：传入速度 v_t
+            pred_next, _ = model(x_t, v_t, explicit, context)
             
             # 计算误差
             mse = torch.nn.functional.mse_loss(pred_next, x_next)
@@ -54,15 +59,16 @@ def evaluate(checkpoint_path, data_path="data/sapien_val.pt"):
             
             # 收集第一个 Batch 用于可视化
             if i == 0:
-                all_preds = pred_next.cpu()
-                all_targets = x_next.cpu()
-                input_points = x_t.cpu()
+                vis_pred = pred_next.cpu()
+                vis_target = x_next.cpu()
+                vis_input = x_t.cpu()
 
     avg_mse = total_mse / len(dataloader)
     print(f"Validation MSE: {avg_mse:.6f}")
     
     # 4. 可视化 (画出第一个样本的对比)
-    visualize(input_points[0], all_targets[0], all_preds[0])
+    if vis_input is not None:
+        visualize(vis_input[0], vis_target[0], vis_pred[0])
 
 def visualize(input_p, target_p, pred_p):
     """保存一张对比图：输入(蓝) -> 真实(绿) vs 预测(红)"""
@@ -84,10 +90,10 @@ def visualize(input_p, target_p, pred_p):
     ax2.set_title("2D Projection (XY)")
     ax2.legend()
     
-    save_path = "eval_result.png"
+    save_path = "assets/eval_result.png"
+    os.makedirs("assets", exist_ok=True)
     plt.savefig(save_path)
     print(f"\nVisualization saved to: {save_path}")
-    print("你可以通过 scp 将这张图片下载到本地查看。")
 
 if __name__ == "__main__":
     # 使用最后一个 Epoch 的模型
