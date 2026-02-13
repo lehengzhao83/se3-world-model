@@ -1,75 +1,101 @@
-## 🛠️ 安装指南 (Installation)
+---
 
-1.  **克隆仓库**
-    ```bash
-    git clone [https://github.com/lehengzhao83/se3-world-model.git](https://github.com/lehengzhao83/se3-world-model.git)
-    cd se3-world-model
-    ```
+# SE(3) World Model 部署与运行指南
 
-2.  **创建环境** (推荐 Python 3.12)
-    ```bash
-    python -m venv .venv
-    source .venv/bin/activate  # Linux/Mac
-    # .venv\Scripts\activate   # Windows
-    ```
+本指南基于 **Alibaba Cloud / Ubuntu (dnf/apt 环境)** 且配备 **NVIDIA GPU (如 8x RTX 4090)** 的服务器环境编写。
 
-3.  **安装依赖**
-    ```bash
-    pip install -r requirements.txt
-    pip install sapien tqdm matplotlib
-    ```
+## 1. 基础系统环境准备
 
-## 🚀 快速开始 (Quick Start)
+首先需要安装 SAPIEN 引擎和底层渲染所需的系统依赖库：
 
-### 1. 数据生成 (Data Generation)
-使用 SAPIEN 物理引擎生成训练和验证数据：
 ```bash
+# 更新系统元数据并安装必要的系统库
+sudo dnf install -y libX11 libXext libXrender libXcomposite libXcursor libXi libXtst mesa-libGL \
+                    vulkan-loader mesa-vulkan-drivers llvm-libs libwayland-client nano
+
+```
+
+## 2. 环境配置 (Conda)
+
+建议使用 Miniconda 来管理 Python 环境（Python 3.10 为佳）：
+
+```bash
+# 1. 下载并安装 Miniconda (如果尚未安装)
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+bash Miniconda3-latest-Linux-x86_64.sh -b -p $HOME/miniconda
+source ~/.bashrc
+$HOME/miniconda/bin/conda init bash
+source ~/.bashrc
+
+# 2. 创建并激活 Python 3.10 环境
+conda create -n se3 python=3.10 -y
+conda activate se3
+
+```
+
+## 3. 安装 Python 依赖
+
+**注意：** 必须安装特定版本的 `sapien` 以匹配脚本 API，并安装支持 CUDA 12.1 的 `torch`。
+
+```bash
+# 1. 安装 PyTorch 相关 (CUDA 12.1 版本)
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+# 2. 安装 SAPIEN 2.2.2 (核心物理仿真引擎)
+pip install sapien==2.2.2
+
+# 3. 安装其他工具库
+pip install numpy transforms3d tqdm scipy matplotlib
+
+```
+
+## 4. 数据生成 (Data Generation)
+
+使用 SAPIEN 物理引擎生成训练和验证所需的点云序列数据：
+
+```bash
+# 设置显卡可见（可选，防止多进程冲突）
+export CUDA_VISIBLE_DEVICES=0
+
+# 运行数据生成脚本
 python scripts/generate_sapien_data.py
-生成的数据将保存在 data/ 目录下 (sapien_train.pt, sapien_val.pt)。
 
-2. 模型训练 (Training)
-支持单卡及多卡 DDP 训练。
+```
 
-单卡调试:
+*执行成功后，会在 `data/` 目录下生成 `sapien_train.pt` 和 `sapien_val.pt`。*
 
-Bash
-python train.py --batch_size 32 --epochs 10
-多卡分布式训练 (推荐 8x 4090):
+## 5. 模型训练 (Training)
 
-Bash
-torchrun --nproc_per_node=8 train.py --batch_size 128 --epochs 50
-3. 评估与可视化 (Evaluation)
-加载训练好的权重，计算 MSE 指标并生成对比图：
+支持多显卡分布式训练（以 8 张显卡为例）：
 
-Bash
+```bash
+# 确保所有显卡可见并启动分布式训练
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+torchrun --nproc_per_node=8 --master_port=29500 \
+train.py --batch_size 128 --epochs 50
+
+```
+
+## 6. 模型评估与可视化 (Evaluation)
+
+加载训练好的权重进行评估，并生成对比图：
+
+```bash
 python evaluate.py
-结果图片将保存为 eval_result.png。
 
-📂 项目结构 (Structure)
-Plaintext
-se3-world-model/
-├── .github/              # CI/CD 配置
-├── assets/               # 结果展示图片
-├── data/                 # 数据集存放目录 (gitignored)
-├── checkpoints/          # 模型权重保存目录 (gitignored)
-├── scripts/
-│   └── generate_sapien_data.py  # SAPIEN 数据生成脚本
-├── src/
-│   └── se3_world_model/
-│       ├── components.py # Encoder/Decoder 组件
-│       ├── dataset.py    # 数据加载器
-│       ├── forces.py     # 显式/隐式力处理模块
-│       ├── layers.py     # Vector Neurons 核心层
-│       └── model.py      # 完整的世界模型架构
-├── tests/                # 单元测试
-├── train.py              # DDP 训练脚本
-├── evaluate.py           # 评估与可视化脚本
-├── pyproject.toml        # 项目配置 (Linter/Type Checker)
-└── requirements.txt      # 依赖列表
-🤝 贡献 (Contributing)
-本项目执行严格的代码规范。提交代码前请运行以下检查：
+```
 
-Bash
-ruff check .
-pyright .
-python -m unittest discover -s tests
+*结果将保存为 `eval_result.png`。*
+
+
+---
+
+### 💡 实用小工具
+
+如果你需要将生成的评估图下载到本地查看（以 Windows/Mac 本地终端为例）：
+
+```bash
+# 替换 zlhll@10.0.67.74 为你的服务器 IP
+scp -o ProxyJump=zlhll@101.132.77.141 zlhll@10.0.67.74:~/se3-world-model/eval_result.png ~/Desktop/
+
+```
