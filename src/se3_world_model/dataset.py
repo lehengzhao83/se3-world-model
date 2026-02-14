@@ -2,66 +2,63 @@ import os
 import torch
 from torch.utils.data import Dataset
 
-class SapienDataset(Dataset):
+class SapienSequenceDataset(Dataset):
     """
-    Input: Normalized Pos (x), Normalized Vel (v), Explicit, Context
-    Target: Normalized Next Vel (v_next) -- NOT Position!
+    加载序列数据，用于多步训练。
+    Returns: 
+        x_seq: [Seq_Len, N, 3]
+        v_seq: [Seq_Len, N, 3]
+        explicit: [Seq_Len, 1, 3]
+        context: [Seq_Len, 3]
     """
-    def __init__(self, data_path: str) -> None:
+    def __init__(self, data_path: str, sub_seq_len: int = 5) -> None:
         super().__init__()
         if not os.path.exists(data_path):
-            raise FileNotFoundError(f"Data file not found: {data_path}")
+            print(f"Warning: {data_path} not found.")
+            return
 
-        print(f"Loading dataset: {data_path} ...")
-        # weights_only=True for security
+        print(f"Loading sequence dataset: {data_path} ...")
+        # weights_only=True 提高安全性
         self.data = torch.load(data_path, weights_only=True)
-
-        self.x_t = self.data["x_t"]
-        self.v_t = self.data["v_t"]
+        
+        self.x = self.data["x"]       # [N_traj, Full_Seq, N, 3]
+        self.v = self.data["v"]
         self.explicit = self.data["explicit"]
         self.context = self.data["context"]
-        self.x_next = self.data["x_next"]
-
-        # 1. Position Stats (Global)
-        all_pos = torch.cat([self.x_t, self.x_next], dim=0)
-        self.pos_mean = all_pos.mean(dim=(0, 1), keepdim=True)
-        self.pos_std = all_pos.std(dim=(0, 1), keepdim=True).clamp(min=1e-6)
-
-        # 2. Velocity Stats (Local - Critical!)
-        # Calculate real v_next from data to ensure consistency
-        v_next_real = self.x_next - self.x_t
-        all_vel = torch.cat([self.v_t, v_next_real], dim=0)
         
-        # Velocity is a vector, mean should be close to 0, but std is important
-        self.vel_mean = all_vel.mean(dim=(0, 1), keepdim=True)
-        self.vel_std = all_vel.std(dim=(0, 1), keepdim=True).clamp(min=1e-6)
-
-        print(f"Stats - Pos Std: {self.pos_std.mean().item():.4f} | Vel Std: {self.vel_std.mean().item():.4f}")
-        # Explain: If Pos Std >> Vel Std, previous model failed because delta was too small.
-
-    def __len__(self) -> int:
-        return len(self.x_t)
-
-    def __getitem__(self, idx: int):
-        # Raw Data
-        x = self.x_t[idx]
-        v = self.v_t[idx]
-        x_next = self.x_next[idx]
-
-        # Normalize Position using Pos Stats
-        x_norm = (x - self.pos_mean[0]) / self.pos_std[0]
+        self.sub_seq_len = sub_seq_len
+        self.num_traj = self.x.shape[0]
+        self.full_seq_len = self.x.shape[1]
         
-        # Normalize Velocity using Vel Stats (Amplification)
-        v_norm = (v - self.vel_mean[0]) / self.vel_std[0]
+        # === 修复：确保统计量维度正确 ===
+        # 原始维度 [N_traj, Full_Seq, N, 3] -> mean -> [1, 1, 1, 3]
+        # 我们需要将其 view 为 [1, 1, 3] 以便与 [S, N, 3] 正确广播
+        self.pos_mean = self.x.mean(dim=(0,1,2)).view(1, 1, 3)
+        self.pos_std = self.x.std(dim=(0,1,2)).clamp(min=1e-6).view(1, 1, 3)
         
-        # Target: Normalized Next Velocity
-        v_next_real = x_next - x
-        target_v_norm = (v_next_real - self.vel_mean[0]) / self.vel_std[0]
+        self.vel_mean = self.v.mean(dim=(0,1,2)).view(1, 1, 3)
+        self.vel_std = self.v.std(dim=(0,1,2)).clamp(min=1e-6).view(1, 1, 3)
         
-        return (
-            x_norm.float(), 
-            v_norm.float(), 
-            self.explicit[idx].float(), 
-            self.context[idx].float(), 
-            target_v_norm.float() # Target is Velocity!
-        )
+        print(f"Stats - Pos Std: {self.pos_std.mean():.4f}, Vel Std: {self.vel_std.mean():.4f}")
+
+    def __len__(self):
+        # 简单起见，每条轨迹作为一个样本来源
+        return self.num_traj
+
+    def __getitem__(self, idx):
+        # 随机选择一个起始点
+        max_start = self.full_seq_len - self.sub_seq_len
+        t_start = torch.randint(0, max_start + 1, (1,)).item()
+        
+        # 提取切片 [Sub_Seq, N, 3]
+        x_seq = self.x[idx, t_start : t_start + self.sub_seq_len]
+        v_seq = self.v[idx, t_start : t_start + self.sub_seq_len]
+        explicit = self.explicit[idx, t_start : t_start + self.sub_seq_len]
+        context = self.context[idx, t_start : t_start + self.sub_seq_len]
+        
+        # 归一化
+        # [S, N, 3] - [1, 1, 3] -> [S, N, 3] (保持3维)
+        x_norm = (x_seq - self.pos_mean) / self.pos_std
+        v_norm = (v_seq - self.vel_mean) / self.vel_std
+        
+        return x_norm.float(), v_norm.float(), explicit.float(), context.float()
