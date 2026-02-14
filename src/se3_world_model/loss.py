@@ -3,35 +3,41 @@ import torch.nn as nn
 
 class GeometricConsistencyLoss(nn.Module):
     """
-    混合物理损失函数：
-    1. MSE Loss: 保证轨迹位置准确。
-    2. Rigidity Loss (刚性约束): 保证物体在运动过程中不散架、不变形。
+    混合物理损失函数：轨迹 + 刚性 + 能量约束
     """
-    def __init__(self, lambda_rigid: float = 0.5):
+    def __init__(self, lambda_rigid: float = 2.0, lambda_energy: float = 0.1):
         super().__init__()
         self.mse = nn.MSELoss()
         self.lambda_rigid = lambda_rigid
+        self.lambda_energy = lambda_energy
 
-    def forward(self, pred_x: torch.Tensor, target_x: torch.Tensor):
+    def forward(self, pred_x: torch.Tensor, target_x: torch.Tensor, 
+                pred_v: torch.Tensor, target_v: torch.Tensor):
         """
         Args:
-            pred_x: [B, N, 3] 预测点云
-            target_x: [B, N, 3] 真实点云
+            pred_x: [B, N, 3] 预测位置
+            target_x: [B, N, 3] 真实位置
+            pred_v: [B, N, 3] 预测速度
+            target_v: [B, N, 3] 真实速度
         """
-        # 1. 轨迹误差 (MSE)
+        # 1. 轨迹误差 (Trajectory Loss)
         traj_loss = self.mse(pred_x, target_x)
         
-        # 2. 刚性误差 (Rigidity / Isometric Loss)
-        # 计算预测点云内部两两点之间的距离矩阵
-        # P: [B, N, 3] -> Dist: [B, N, N]
+        # 2. 刚性误差 (Rigidity Loss)
         pred_dist = torch.cdist(pred_x, pred_x, p=2)
         target_dist = torch.cdist(target_x, target_x, p=2)
-        
-        # 强制要求：预测后的形状内部距离 = 真实形状内部距离
-        # 这能有效防止点云“散开”或“缩成一团”
         rigid_loss = self.mse(pred_dist, target_dist)
         
-        # 总 Loss
-        total_loss = traj_loss + self.lambda_rigid * rigid_loss
+        # 3. 能量/动能一致性 (Energy Consistency Loss)
+        # 动能 K = 0.5 * m * v^2。假设质量均匀，只需约束 v^2 的一致性
+        # 这能防止物体凭空加速或减速
+        pred_k = torch.sum(pred_v**2, dim=-1)   # [B, N]
+        target_k = torch.sum(target_v**2, dim=-1) # [B, N]
+        energy_loss = self.mse(pred_k, target_k)
         
-        return total_loss, traj_loss, rigid_loss
+        # 总 Loss
+        total_loss = traj_loss + \
+                     self.lambda_rigid * rigid_loss + \
+                     self.lambda_energy * energy_loss
+        
+        return total_loss, traj_loss, rigid_loss, energy_loss
