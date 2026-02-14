@@ -1,13 +1,10 @@
 import os
-
 import numpy as np
 import sapien.core as sapien
 import torch
 from tqdm import tqdm
 
-
 def sample_capsule_points(r: float, l: float, n: int) -> np.ndarray:
-    """在胶囊体表面/内部均匀采样点云"""
     points = []
     while len(points) < n:
         pt = np.random.uniform(low=[-l - r, -r, -r], high=[l + r, r, r])
@@ -22,114 +19,103 @@ def sample_capsule_points(r: float, l: float, n: int) -> np.ndarray:
             points.append(pt)
     return np.array(points, dtype=np.float32)
 
-
-def generate_dataset(num_samples: int = 10000, save_path: str = "data/sapien_train.pt") -> None:
-    # 确保文件夹存在
+def generate_trajectory_dataset(
+    num_trajectories: int = 2000, 
+    seq_len: int = 10,  # [核心修改] 每个样本是一条长为 10 的轨迹
+    save_path: str = "data/sapien_train_seq.pt"
+) -> None:
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    print(f"Generating {num_trajectories} trajectories (Length={seq_len})...")
 
-    print(f"正在初始化 SAPIEN 引擎 (物理模拟模式)...目标：{num_samples} 条")
-
-    # 1. 初始化引擎
     engine = sapien.Engine()
     engine.set_log_level("error")
     scene = engine.create_scene()
     scene.set_timestep(1 / 100.0)
 
-    # 2. 预计算标准点云
     canonical_points = sample_capsule_points(0.1, 0.2, 64)
-    all_x_t, all_v_t, all_explicit, all_context, all_x_next = [], [], [], [], []
+    
+    # 存储容器：List of sequences
+    # 最终形状将是 [N_traj, Seq_Len, ...]
+    data_store = {
+        "x": [], 
+        "v": [], 
+        "explicit": [], 
+        "context": []
+    }
 
-    # 3. 创建物体
     builder = scene.create_actor_builder()
     builder.add_capsule_collision(radius=0.1, half_length=0.2)
-    builder.set_mass_and_inertia(
-        1.0,
-        sapien.Pose([0, 0, 0], [1, 0, 0, 0]),
-        np.array([0.1, 0.1, 0.1], dtype=np.float32)
-    )
+    builder.set_mass_and_inertia(1.0, sapien.Pose(), np.array([0.1, 0.1, 0.1], dtype=np.float32))
     actor = builder.build(name="dynamic_object")
 
-    # 4. 开始生成
-    for _ in tqdm(range(num_samples)):
-        # 随机环境力
+    for _ in tqdm(range(num_trajectories)):
+        # 1. 随机力场
         gravity_acc = np.random.randn(3).astype(np.float32)
         gravity_acc = gravity_acc / (np.linalg.norm(gravity_acc) + 1e-6) * 9.8
         wind_force = np.random.randn(3).astype(np.float32) * 2.0
         total_force = gravity_acc + wind_force
 
-        # 随机初始化状态
+        # 2. 随机初始状态
         pos = np.random.randn(3).astype(np.float32) * 0.5
         q = np.random.randn(4).astype(np.float32)
-        q /= (np.linalg.norm(q) + 1e-6)
+        q /= np.linalg.norm(q)
         actor.set_pose(sapien.Pose(pos, q))
-        actor.set_velocity([0, 0, 0])
-        actor.set_angular_velocity([0, 0, 0])
-
-        # === 关键修改：两段式模拟以获取速度 ===
-
-        # Phase 1: 模拟 t-1 -> t (Warmup)
-        for _ in range(5):
-            current_pos = actor.get_pose().p
-            actor.add_force_at_point(total_force, current_pos)
-            scene.step()
-
-        # 记录 t 时刻状态 (Input)
-        mat_t = actor.get_pose().to_transformation_matrix()
-        pts_t = (mat_t[:3, :3] @ canonical_points.T).T + mat_t[:3, 3]
-
-        # 记录上一帧状态用于计算速度 (Pre-Input)
-        # 注意：这里我们实际上不需要 pts_prev 的绝对坐标，只需要算出 v
-        # 但为了严谨，我们应该记录 warmup 之前的状态吗？
-        # 不，最好的方式是：Warmup 5步 -> 记录 Prev -> Sim 5步 -> 记录 Curr -> Sim 5步 -> 记录 Next
-        # 为了简化且保持物理连续性，我们直接利用 SAPIEN 的速度，或者再跑一段。
-        # 修正逻辑：
-        # Reset -> 记录 pts_prev -> Sim 5步 -> 记录 pts_t -> Sim 5步 -> 记录 pts_next
-        # 这样 v = pts_t - pts_prev 是完全真实的物理位移速度
-
-        # 重来一次逻辑：
-        # 1. Reset
-        # 2. Capture T-1
-        mat_prev = actor.get_pose().to_transformation_matrix()
-        pts_prev = (mat_prev[:3, :3] @ canonical_points.T).T + mat_prev[:3, 3]
-
-        # 3. Sim 5 steps (T-1 -> T)
+        
+        # 关键：赋予随机初速度，否则很难学到动态变化
+        v_init = np.random.randn(3).astype(np.float32) * 2.0
+        actor.set_velocity(v_init)
+        
+        # 3. 预热 (Warmup) 获取 t=0 的状态
+        # T-1
+        mat = actor.get_pose().to_transformation_matrix()
+        pts_prev = (mat[:3, :3] @ canonical_points.T).T + mat[:3, 3]
+        
+        # Sim step
         for _ in range(5):
             actor.add_force_at_point(total_force, actor.get_pose().p)
             scene.step()
 
-        # 4. Capture T (Input)
-        mat_t = actor.get_pose().to_transformation_matrix()
-        pts_t = (mat_t[:3, :3] @ canonical_points.T).T + mat_t[:3, 3]
+        # 4. 生成序列
+        traj_x = []
+        traj_v = []
+        
+        # 我们需要收集 seq_len 个连续帧
+        for t in range(seq_len):
+            # Capture Current (T)
+            mat = actor.get_pose().to_transformation_matrix()
+            pts_curr = (mat[:3, :3] @ canonical_points.T).T + mat[:3, 3]
+            
+            # Compute Velocity (T - (T-1))
+            vel = pts_curr - pts_prev
+            
+            traj_x.append(pts_curr)
+            traj_v.append(vel)
+            
+            # Update Prev
+            pts_prev = pts_curr
+            
+            # Sim next step
+            for _ in range(5):
+                actor.add_force_at_point(total_force, actor.get_pose().p)
+                scene.step()
+        
+        # Stack trajectory
+        data_store["x"].append(np.stack(traj_x))       # [Seq_Len, N, 3]
+        data_store["v"].append(np.stack(traj_v))       # [Seq_Len, N, 3]
+        
+        # Force is constant for the whole trajectory
+        # Expand to [Seq_Len, 1, 3]
+        data_store["explicit"].append(np.tile(gravity_acc.reshape(1, 1, 3), (seq_len, 1, 1)))
+        data_store["context"].append(np.tile(wind_force.reshape(1, 3), (seq_len, 1)))
 
-        # 5. Compute Velocity (Input)
-        velocity = pts_t - pts_prev
+    # Convert to Tensor
+    for k in data_store:
+        data_store[k] = torch.tensor(np.array(data_store[k]))
 
-        # 6. Sim 5 steps (T -> T+1)
-        for _ in range(5):
-            actor.add_force_at_point(total_force, actor.get_pose().p)
-            scene.step()
-
-        # 7. Capture T+1 (Target)
-        mat_next = actor.get_pose().to_transformation_matrix()
-        pts_next = (mat_next[:3, :3] @ canonical_points.T).T + mat_next[:3, 3]
-
-        all_x_t.append(pts_t)
-        all_v_t.append(velocity)  # 新增：速度场
-        all_explicit.append(gravity_acc.reshape(1, 3))
-        all_context.append(wind_force)
-        all_x_next.append(pts_next)
-
-    # 6. 保存数据
-    torch.save({
-        "x_t": torch.tensor(np.array(all_x_t)),
-        "v_t": torch.tensor(np.array(all_v_t)),  # 保存速度
-        "explicit": torch.tensor(np.array(all_explicit)),
-        "context": torch.tensor(np.array(all_context)),
-        "x_next": torch.tensor(np.array(all_x_next))
-    }, save_path)
-    print(f"数据已保存至 {save_path} (含速度信息)")
-
+    torch.save(data_store, save_path)
+    print(f"Saved sequential dataset to {save_path}")
 
 if __name__ == "__main__":
-    generate_dataset(10000, "data/sapien_train.pt")
-    generate_dataset(1000, "data/sapien_val.pt")
+    # 2000 条轨迹，每条 20 帧，相当于 40000 个单步样本，但包含了时序信息
+    generate_trajectory_dataset(2000, 20, "data/sapien_train_seq.pt") 
+    generate_trajectory_dataset(200, 20, "data/sapien_val_seq.pt")
