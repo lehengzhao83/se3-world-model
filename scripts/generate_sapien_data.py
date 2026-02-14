@@ -16,7 +16,7 @@ def sample_capsule_points(r: float, l: float, n: int) -> np.ndarray:
 
 def generate_trajectory_dataset(
     num_trajectories: int = 10000,  # === 改进点：数据量 2k -> 10k ===
-    traj_len: int = 20, 
+    traj_len: int = 60, 
     save_path: str = "data/sapien_train_seq.pt"
 ) -> None:
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
