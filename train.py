@@ -71,7 +71,7 @@ def train(
     criterion_pos = GeometricConsistencyLoss(lambda_rigid=2.0, lambda_energy=0.1).to(device)
     
     # 位置误差权重：位置漂移是致命的，给予高权重
-    LOSS_WEIGHT_POS = 5.0 
+    LOSS_WEIGHT_POS = 2.0 
 
     if global_rank == 0:
         print(f"=== 启动 Enhanced Curriculum Rollout Training ===")
@@ -157,7 +157,7 @@ def train(
             final_loss.backward()
             
             # 梯度裁剪 (防止 Rollout 导致的梯度爆炸)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
             optimizer.step()
             
             total_loss += final_loss.item()
