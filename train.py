@@ -1,7 +1,7 @@
-# ... (Imports same as before)
 import argparse
 import os
 import sys
+
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -11,10 +11,9 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
-from se3_world_model.dataset import SapienDataset
+from se3_world_model.dataset import SapienSequenceDataset
 from se3_world_model.model import SE3WorldModel
 
-# ... (setup_distributed, cleanup_distributed same as before)
 def setup_distributed() -> tuple[int, int, int]:
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
         rank = int(os.environ["RANK"])
@@ -28,16 +27,21 @@ def setup_distributed() -> tuple[int, int, int]:
 def cleanup_distributed():
     if dist.is_initialized(): dist.destroy_process_group()
 
-def train(epochs: int = 50, batch_size: int = 64, lr: float = 1e-3, save_dir: str = "checkpoints"):
+def train(epochs: int = 50, batch_size: int = 32, lr: float = 1e-3, save_dir: str = "checkpoints"):
     local_rank, global_rank, world_size = setup_distributed()
     device = torch.device(f"cuda:{local_rank}")
 
-    if global_rank == 0: print("Initializing...")
-
-    # Load Dataset (Computes Vel Stats automatically)
-    dataset = SapienDataset(data_path="data/sapien_train.pt")
+    # 1. 使用序列 Dataset
+    # 训练时每次看 5 步 (H=5)
+    rollout_steps = 5
+    dataset = SapienSequenceDataset("data/sapien_train_seq.pt", sub_seq_len=rollout_steps+1)
+    
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=global_rank, shuffle=True)
     dataloader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=4, pin_memory=True)
+
+    # 获取归一化比例，用于在 Rollout 中正确积分位置
+    # ratio = Vel_Std / Pos_Std
+    scale_ratio = (dataset.vel_std / dataset.pos_std).to(device)
 
     model = SE3WorldModel(num_points=64, latent_dim=64, num_global_vectors=1, context_dim=3).to(device)
     model = DDP(model, device_ids=[local_rank], output_device=local_rank)
@@ -45,31 +49,61 @@ def train(epochs: int = 50, batch_size: int = 64, lr: float = 1e-3, save_dir: st
     optimizer = optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
 
-    if global_rank == 0: os.makedirs(save_dir, exist_ok=True)
+    if global_rank == 0:
+        print(f"=== 启动 H-Step Rollout Training (H={rollout_steps}) ===")
+        os.makedirs(save_dir, exist_ok=True)
 
     model.train()
+
     for epoch in range(epochs):
         sampler.set_epoch(epoch)
         total_loss = 0.0
         
-        # Note: Unpacking target_v_norm instead of x_next
-        for batch_idx, (x_norm, v_norm, explicit, context, target_v_norm) in enumerate(dataloader):
-            x_norm = x_norm.to(device, non_blocking=True)
-            v_norm = v_norm.to(device, non_blocking=True)
-            explicit = explicit.to(device, non_blocking=True)
-            context = context.to(device, non_blocking=True)
-            target_v_norm = target_v_norm.to(device, non_blocking=True)
+        # Data: [B, H+1, N, 3]
+        for batch_idx, (x_seq, v_seq, explicit_seq, context_seq) in enumerate(dataloader):
+            x_seq = x_seq.to(device, non_blocking=True)
+            v_seq = v_seq.to(device, non_blocking=True)
+            explicit_seq = explicit_seq.to(device, non_blocking=True)
+            context_seq = context_seq.to(device, non_blocking=True)
 
             optimizer.zero_grad()
             
-            # Predict Normalized Velocity
-            pred_v_norm, _ = model(x_norm, v_norm, explicit, context)
-
-            # Loss on Velocity (Scales are now O(1))
-            loss = criterion(pred_v_norm, target_v_norm)
+            # 初始化状态 (t=0)
+            curr_x = x_seq[:, 0]
+            curr_v = v_seq[:, 0]
+            
+            loss_accum = 0.0
+            
+            # === 核心：自回归 Rollout 循环 ===
+            for t in range(rollout_steps):
+                # 1. 预测下一步速度
+                # explicit/context 取当前时刻 t
+                pred_v_next, _ = model(curr_x, curr_v, explicit_seq[:, t], context_seq[:, t])
+                
+                # 2. 计算当前步的 Loss
+                # Target 是序列中真实的 t+1 时刻速度
+                target_v_next = v_seq[:, t+1]
+                loss_accum += criterion(pred_v_next, target_v_next)
+                
+                # 3. 状态更新 (Differentiable Physics Integration)
+                # 这一步让梯度可以通过时间反向传播 (BPTT)
+                
+                # 更新位置: x_{t+1} = x_t + v_{t+1}
+                # 注意：这是在 Normalized 空间更新，需要乘以 scale_ratio 才能符合物理
+                # x_norm_new = x_norm_old + v_norm_new * (vel_std / pos_std)
+                curr_x = curr_x + pred_v_next * scale_ratio
+                
+                # 更新速度: v_{t+1} = pred_v_next
+                curr_v = pred_v_next
+            
+            # 平均 Loss
+            loss = loss_accum / rollout_steps
             
             loss.backward()
+            # 梯度裁剪防止爆炸 (BPTT 常见问题)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+            
             total_loss += loss.item()
 
             if global_rank == 0 and batch_idx % 10 == 0:
@@ -83,9 +117,4 @@ def train(epochs: int = 50, batch_size: int = 64, lr: float = 1e-3, save_dir: st
     cleanup_distributed()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    args = parser.parse_args()
-    train(epochs=args.epochs, batch_size=args.batch_size, lr=args.lr)
+    train(epochs=50, batch_size=32)
