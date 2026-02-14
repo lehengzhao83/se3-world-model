@@ -1,16 +1,16 @@
 import argparse
 import os
 import sys
-
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
+import torch.distributed as dist
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
+# 引用新的 Dataset
 from se3_world_model.dataset import SapienSequenceDataset
 from se3_world_model.model import SE3WorldModel
 
@@ -31,15 +31,15 @@ def train(epochs: int = 50, batch_size: int = 32, lr: float = 1e-3, save_dir: st
     local_rank, global_rank, world_size = setup_distributed()
     device = torch.device(f"cuda:{local_rank}")
 
-    # 1. 使用序列 Dataset
-    # 训练时每次看 5 步 (H=5)
-    rollout_steps = 5
-    dataset = SapienSequenceDataset("data/sapien_train_seq.pt", sub_seq_len=rollout_steps+1)
+    # 1. 加载序列数据
+    # seq_len = 6 (输入1帧 + 预测5帧)
+    rollout_steps = 5 
+    dataset = SapienSequenceDataset("data/sapien_train_seq.pt", seq_len=rollout_steps+1)
     
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=global_rank, shuffle=True)
     dataloader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=4, pin_memory=True)
 
-    # 获取归一化比例，用于在 Rollout 中正确积分位置
+    # 获取缩放比例：用于在 Rollout 时把预测的速度加回到位置上
     # ratio = Vel_Std / Pos_Std
     scale_ratio = (dataset.vel_std / dataset.pos_std).to(device)
 
@@ -59,7 +59,7 @@ def train(epochs: int = 50, batch_size: int = 32, lr: float = 1e-3, save_dir: st
         sampler.set_epoch(epoch)
         total_loss = 0.0
         
-        # Data: [B, H+1, N, 3]
+        # x_seq: [B, Seq, N, 3]
         for batch_idx, (x_seq, v_seq, explicit_seq, context_seq) in enumerate(dataloader):
             x_seq = x_seq.to(device, non_blocking=True)
             v_seq = v_seq.to(device, non_blocking=True)
@@ -68,46 +68,42 @@ def train(epochs: int = 50, batch_size: int = 32, lr: float = 1e-3, save_dir: st
 
             optimizer.zero_grad()
             
-            # 初始化状态 (t=0)
+            # 初始状态 (t=0)
             curr_x = x_seq[:, 0]
             curr_v = v_seq[:, 0]
             
-            loss_accum = 0.0
+            rollout_loss = 0.0
             
-            # === 核心：自回归 Rollout 循环 ===
+            # === 核心：Rollout 循环 ===
             for t in range(rollout_steps):
-                # 1. 预测下一步速度
-                # explicit/context 取当前时刻 t
+                # 1. 预测下一帧速度
+                # 使用当前预测出的 curr_x 和 curr_v
                 pred_v_next, _ = model(curr_x, curr_v, explicit_seq[:, t], context_seq[:, t])
                 
-                # 2. 计算当前步的 Loss
-                # Target 是序列中真实的 t+1 时刻速度
+                # 2. 计算速度 Loss
                 target_v_next = v_seq[:, t+1]
-                loss_accum += criterion(pred_v_next, target_v_next)
+                step_loss = criterion(pred_v_next, target_v_next)
+                rollout_loss += step_loss
                 
-                # 3. 状态更新 (Differentiable Physics Integration)
-                # 这一步让梯度可以通过时间反向传播 (BPTT)
-                
-                # 更新位置: x_{t+1} = x_t + v_{t+1}
-                # 注意：这是在 Normalized 空间更新，需要乘以 scale_ratio 才能符合物理
-                # x_norm_new = x_norm_old + v_norm_new * (vel_std / pos_std)
+                # 3. 状态更新 (积分)
+                # x_{t+1} = x_t + v_{t+1} * ratio
+                # 这一步至关重要：它让误差传播到了 curr_x，
+                # 如果这一步预测偏了，下一步的输入 curr_x 就会偏，导致下一步 Loss 变大。
                 curr_x = curr_x + pred_v_next * scale_ratio
-                
-                # 更新速度: v_{t+1} = pred_v_next
-                curr_v = pred_v_next
+                curr_v = pred_v_next # 更新速度用于下一步输入
             
-            # 平均 Loss
-            loss = loss_accum / rollout_steps
+            # 平均多步 Loss
+            final_loss = rollout_loss / rollout_steps
             
-            loss.backward()
-            # 梯度裁剪防止爆炸 (BPTT 常见问题)
+            final_loss.backward()
+            # 梯度裁剪防止 Rollout 导致的梯度爆炸
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             
-            total_loss += loss.item()
+            total_loss += final_loss.item()
 
             if global_rank == 0 and batch_idx % 10 == 0:
-                print(f"[GPU 0] Epoch {epoch+1} Step {batch_idx} Loss: {loss.item():.6f}")
+                print(f"[GPU 0] Epoch {epoch+1} Step {batch_idx} Rollout Loss: {final_loss.item():.6f}")
 
         if global_rank == 0:
             avg_loss = total_loss / len(dataloader)
