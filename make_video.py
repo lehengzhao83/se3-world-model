@@ -32,7 +32,6 @@ def make_rollout_video(checkpoint_path: str, save_path: str = "assets/simulation
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     print("Loading dataset stats...")
-    # 加载数据集以获取归一化统计量
     train_dataset = SapienSequenceDataset("data/sapien_train_seq.pt")
     
     pos_mean = train_dataset.pos_mean.to(device)
@@ -46,15 +45,16 @@ def make_rollout_video(checkpoint_path: str, save_path: str = "assets/simulation
     print(f"Stats loaded. Scale Ratio: {scale_ratio[0,0,0].item():.4f}")
 
     print(f"Loading model from {checkpoint_path}...")
-    # === 关键修改：latent_dim 必须与 train.py 中一致 (64 -> 128) ===
+    # 注意：latent_dim 必须与 train.py 中一致 (上一轮如果你改了 128，这里也要是 128)
+    # 如果你是用旧代码训练的 64，这里改回 64。
+    # 根据之前的对话，你应该已经改为了 128。
     model = SE3WorldModel(
         num_points=64,
-        latent_dim=128,  # 修改此处
+        latent_dim=128, 
         num_global_vectors=1,
         context_dim=3
     ).to(device)
     
-    # 加载权重 (weights_only=True 消除警告)
     state_dict = torch.load(checkpoint_path, map_location=device, weights_only=True)
     new_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
     model.load_state_dict(new_state_dict)
@@ -103,8 +103,9 @@ def make_rollout_video(checkpoint_path: str, save_path: str = "assets/simulation
     curr_x_norm = (pts_curr_tensor - pos_mean) / pos_std
     curr_v_norm = (velocity_tensor - vel_mean) / vel_std
     
-    explicit_input = torch.tensor(gravity_np).float().to(device).view(1, 1, 3)
-    context_input = torch.tensor(wind_np).float().to(device).view(1, 1, 3) # 保持维度一致性
+    # === 核心修复点：context_input 维度修正 ===
+    explicit_input = torch.tensor(gravity_np).float().to(device).view(1, 1, 3) # [1, 1, 3]
+    context_input = torch.tensor(wind_np).float().to(device).view(1, 3)      # [1, 3] (2D)
 
     frames = 60
     gt_trajectory = []
