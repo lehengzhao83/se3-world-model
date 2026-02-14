@@ -84,3 +84,9 @@ python evaluate.py
 
 *结果将保存为 `eval_result.png`。
 
+生成视频：
+
+```bash
+python make_video.py
+
+```
