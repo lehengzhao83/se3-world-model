@@ -10,7 +10,6 @@ from matplotlib.animation import FuncAnimation
 plt.switch_backend('Agg')
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
-# === 修改点 1: 引用新的 Dataset 类 ===
 from se3_world_model.dataset import SapienSequenceDataset
 from se3_world_model.model import SE3WorldModel
 
@@ -32,9 +31,8 @@ def sample_capsule_points(r: float, l: float, n: int) -> np.ndarray:
 def make_rollout_video(checkpoint_path: str, save_path: str = "assets/simulation.gif"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # === 修改点 2: 加载统计量 (必须与训练时一致) ===
     print("Loading dataset stats...")
-    # 注意：这里加载的是序列数据文件
+    # 加载数据集以获取归一化统计量
     train_dataset = SapienSequenceDataset("data/sapien_train_seq.pt")
     
     pos_mean = train_dataset.pos_mean.to(device)
@@ -42,21 +40,22 @@ def make_rollout_video(checkpoint_path: str, save_path: str = "assets/simulation
     vel_mean = train_dataset.vel_mean.to(device)
     vel_std = train_dataset.vel_std.to(device)
     
-    # 计算积分比例因子: ratio = Vel_Std / Pos_Std
-    # 因为 x_norm 和 v_norm 的缩放不同，dx_norm = v_norm * ratio
+    # 计算积分比例因子
     scale_ratio = (vel_std / pos_std).view(1, 1, 3)
 
     print(f"Stats loaded. Scale Ratio: {scale_ratio[0,0,0].item():.4f}")
 
     print(f"Loading model from {checkpoint_path}...")
+    # === 关键修改：latent_dim 必须与 train.py 中一致 (64 -> 128) ===
     model = SE3WorldModel(
         num_points=64,
-        latent_dim=64,
+        latent_dim=128,  # 修改此处
         num_global_vectors=1,
         context_dim=3
     ).to(device)
     
-    state_dict = torch.load(checkpoint_path, map_location=device)
+    # 加载权重 (weights_only=True 消除警告)
+    state_dict = torch.load(checkpoint_path, map_location=device, weights_only=True)
     new_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
     model.load_state_dict(new_state_dict)
     model.eval()
@@ -82,8 +81,7 @@ def make_rollout_video(checkpoint_path: str, save_path: str = "assets/simulation
 
     canonical_points = sample_capsule_points(0.1, 0.2, 64)
 
-    # === Warmup: 获取初始 t=0 的状态 ===
-    # T-1
+    # === Warmup ===
     mat_prev = actor.get_pose().to_transformation_matrix()
     pts_prev = (mat_prev[:3, :3] @ canonical_points.T).T + mat_prev[:3, 3]
 
@@ -99,15 +97,14 @@ def make_rollout_video(checkpoint_path: str, save_path: str = "assets/simulation
     velocity_raw = pts_curr - pts_prev
 
     # === 归一化输入 ===
-    pts_curr_tensor = torch.tensor(pts_curr).float().to(device).unsqueeze(0) # [1, N, 3]
+    pts_curr_tensor = torch.tensor(pts_curr).float().to(device).unsqueeze(0)
     velocity_tensor = torch.tensor(velocity_raw).float().to(device).unsqueeze(0)
     
-    # Apply Normalization
     curr_x_norm = (pts_curr_tensor - pos_mean) / pos_std
     curr_v_norm = (velocity_tensor - vel_mean) / vel_std
     
     explicit_input = torch.tensor(gravity_np).float().to(device).view(1, 1, 3)
-    context_input = torch.tensor(wind_np).float().to(device).view(1, 3)
+    context_input = torch.tensor(wind_np).float().to(device).view(1, 1, 3) # 保持维度一致性
 
     frames = 60
     gt_trajectory = []
@@ -115,7 +112,7 @@ def make_rollout_video(checkpoint_path: str, save_path: str = "assets/simulation
 
     print("Running rollout...")
     for _ in range(frames):
-        # --- A. GT (Real World) ---
+        # --- A. GT ---
         gt_trajectory.append(pts_curr) 
 
         for _ in range(5):
@@ -126,24 +123,18 @@ def make_rollout_video(checkpoint_path: str, save_path: str = "assets/simulation
         pts_new = (mat_new[:3, :3] @ canonical_points.T).T + mat_new[:3, 3]
         pts_curr = pts_new
 
-        # --- B. Pred (Normalized Space Integration) ---
+        # --- B. Pred ---
         with torch.no_grad():
-            # 1. 预测下一帧的归一化速度
             pred_v_norm, _ = model(curr_x_norm, curr_v_norm, explicit_input, context_input)
             
-            # 2. 积分更新状态 (与 train.py 逻辑完全一致)
-            # x_{t+1} = x_t + v_{t+1} * ratio
+            # 积分更新
             curr_x_norm = curr_x_norm + pred_v_norm * scale_ratio
-            
-            # v_{t+1} = pred_v_norm
             curr_v_norm = pred_v_norm
             
-            # 3. 反归一化用于画图 (Denormalize)
-            # x_real = x_norm * std + mean
+            # 反归一化
             pred_real = curr_x_norm * pos_std + pos_mean
             pred_trajectory.append(pred_real.squeeze(0).cpu().numpy())
 
-    # Rendering
     print(f"Rendering video to {save_path}...")
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')
@@ -156,7 +147,7 @@ def make_rollout_video(checkpoint_path: str, save_path: str = "assets/simulation
         ax.set_xlim(min_b[0], max_b[0])
         ax.set_ylim(min_b[1], max_b[1])
         ax.set_zlim(min_b[2], max_b[2])
-        ax.set_title(f"Rollout Frame {frame}/{frames}\nGreen: GT | Red: Pred (Seq-Rollout)")
+        ax.set_title(f"Rollout Frame {frame}/{frames}\nGreen: GT | Red: Pred")
         
         gt = gt_trajectory[frame]
         ax.scatter(gt[:, 0], gt[:, 1], gt[:, 2], c='green', alpha=0.4, label='GT')
