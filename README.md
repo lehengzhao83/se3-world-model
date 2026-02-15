@@ -45,7 +45,7 @@ pip install sapien==2.2.2
 
 # 3. 安装其他工具库
 pip install numpy transforms3d tqdm scipy matplotlib
-pip install requirements.txt
+pip install -r requirements.txt
 ```
 
 ## 4. 数据生成 (Data Generation)
