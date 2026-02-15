@@ -9,12 +9,11 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
 
-# 确保 src 目录在 python path 中
+
 sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 
 from se3_world_model.dataset import SapienSequenceDataset
 from se3_world_model.model import SE3WorldModel
-# 引用包含能量约束的新 Loss
 from se3_world_model.loss import GeometricConsistencyLoss
 
 def setup_distributed() -> tuple[int, int, int]:
@@ -59,7 +58,6 @@ def train(
     scale_ratio = (dataset.vel_std / dataset.pos_std).to(device)
 
     # 2. 模型初始化
-    # 注意：latent_dim=128，与 make_video.py 保持一致
     model = SE3WorldModel(num_points=64, latent_dim=128, num_global_vectors=1, context_dim=3).to(device)
     model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
