@@ -1,47 +1,42 @@
-# === 实验默认配置 ===
-
+# conf/config.yaml
 defaults:  
   - _self_  
   - override hydra/job_logging: disabled  
   - override hydra/hydra_logging: disabled  
 
-# 1. 训练参数
 training:
-  epochs: 100
+  epochs: 150             # 增加总 Epoch 数，因为学习变慢了
   batch_size: 32
   lr: 1e-3
   save_dir: "checkpoints"
   num_workers: 4
   grad_clip: 0.5
+  noise_std: 0.01         # <--- 新增：输入噪声标准差 (关键!)
   
-  # Curriculum Learning 策略
   curriculum:
-    max_rollout_steps: 15
+    max_rollout_steps: 12 # 稍微降低最大长度，先求稳
     start_rollout_steps: 5
-    increase_every_epochs: 8
-    teacher_forcing_decay_epochs: 20
+    increase_every_epochs: 15        # 放缓：每 15 个 Epoch 加一步
+    teacher_forcing_decay_epochs: 50 # 放缓：前 50 个 Epoch 都有较高的 Teacher Forcing
 
-  # Loss 权重
   loss_weights:
     pos: 2.0
     rigid: 2.0
     energy: 0.1
 
-# 2. 模型参数 (与 model.py 对应)
 model:
   num_points: 64
   latent_dim: 128
   num_global_vectors: 1
   context_dim: 3
+  history_len: 3          # 保持历史窗口为 3
 
-# 3. 数据集参数
 dataset:
   train_path: "data/sapien_train_seq.pt"
   val_path: "data/sapien_val_seq.pt"
 
-# 4. 日志与监控 (WandB / TensorBoard)
 logger:
   project_name: "se3-world-model"
-  run_name: "baseline_experiment"  # 每次实验可以改这个名字
+  run_name: "seq2seq_noise_injection" # 改个名字以便区分
   use_wandb: true
   use_tensorboard: true
