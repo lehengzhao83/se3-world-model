@@ -31,6 +31,11 @@ def sample_capsule_points(r: float, l: float, n: int) -> np.ndarray:
 def make_rollout_video(checkpoint_path: str, save_path: str = "assets/simulation.gif"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
+    # === 1. Config ===
+    # 必须与训练时的配置一致！
+    HISTORY_LEN = 3 
+    LATENT_DIM = 128
+    
     print("Loading dataset stats...")
     train_dataset = SapienSequenceDataset("data/sapien_train_seq.pt")
     
@@ -39,20 +44,17 @@ def make_rollout_video(checkpoint_path: str, save_path: str = "assets/simulation
     vel_mean = train_dataset.vel_mean.to(device)
     vel_std = train_dataset.vel_std.to(device)
     
-    # 计算积分比例因子
-    scale_ratio = (vel_std / pos_std).view(1, 1, 3)
+    scale_ratio = (vel_std / pos_std).view(1, 1, 3) # [1, 1, 3]
 
     print(f"Stats loaded. Scale Ratio: {scale_ratio[0,0,0].item():.4f}")
 
     print(f"Loading model from {checkpoint_path}...")
-    # 注意：latent_dim 必须与 train.py 中一致 (上一轮如果你改了 128，这里也要是 128)
-    # 如果你是用旧代码训练的 64，这里改回 64。
-    # 根据之前的对话，你应该已经改为了 128。
     model = SE3WorldModel(
         num_points=64,
-        latent_dim=128, 
+        latent_dim=LATENT_DIM, 
         num_global_vectors=1,
-        context_dim=3
+        context_dim=3,
+        history_len=HISTORY_LEN  # <--- 关键修复：必须显式指定 history_len
     ).to(device)
     
     state_dict = torch.load(checkpoint_path, map_location=device, weights_only=True)
@@ -75,70 +77,104 @@ def make_rollout_video(checkpoint_path: str, save_path: str = "assets/simulation
     builder.set_mass_and_inertia(1.0, sapien.Pose(), np.array([0.1, 0.1, 0.1], dtype=np.float32))
     actor = builder.build(name="dynamic_object")
     
-    # 初始状态
     actor.set_pose(sapien.Pose([0, 0, 0], [1, 0, 0, 0]))
     actor.set_velocity(np.array([0.0, 1.0, 2.0], dtype=np.float32)) 
 
     canonical_points = sample_capsule_points(0.1, 0.2, 64)
 
-    # === Warmup ===
-    mat_prev = actor.get_pose().to_transformation_matrix()
-    pts_prev = (mat_prev[:3, :3] @ canonical_points.T).T + mat_prev[:3, 3]
+    # === Context Inputs ===
+    explicit_input = torch.tensor(gravity_np).float().to(device).view(1, 1, 3) 
+    context_input = torch.tensor(wind_np).float().to(device).view(1, 3)
 
-    for _ in range(5):
-        actor.add_force_at_point(total_force, actor.get_pose().p)
-        scene.step()
-
-    # T (Current)
-    mat_curr = actor.get_pose().to_transformation_matrix()
-    pts_curr = (mat_curr[:3, :3] @ canonical_points.T).T + mat_curr[:3, 3]
+    #Buffers to store history
+    # 我们需要先运行仿真 fill 满 history_len 的长度
+    history_x = []
+    history_v = []
     
-    # 计算真实速度
-    velocity_raw = pts_curr - pts_prev
-
-    # === 归一化输入 ===
-    pts_curr_tensor = torch.tensor(pts_curr).float().to(device).unsqueeze(0)
-    velocity_tensor = torch.tensor(velocity_raw).float().to(device).unsqueeze(0)
-    
-    curr_x_norm = (pts_curr_tensor - pos_mean) / pos_std
-    curr_v_norm = (velocity_tensor - vel_mean) / vel_std
-    
-    # === 核心修复点：context_input 维度修正 ===
-    explicit_input = torch.tensor(gravity_np).float().to(device).view(1, 1, 3) # [1, 1, 3]
-    context_input = torch.tensor(wind_np).float().to(device).view(1, 3)      # [1, 3] (2D)
-
-    frames = 60
     gt_trajectory = []
     pred_trajectory = []
 
-    print("Running rollout...")
-    for _ in range(frames):
-        # --- A. GT ---
-        gt_trajectory.append(pts_curr) 
+    print(f"Warming up for {HISTORY_LEN} steps to fill history buffer...")
+    
+    # === Warmup Phase (Collect History) ===
+    mat_prev = actor.get_pose().to_transformation_matrix()
+    pts_prev = (mat_prev[:3, :3] @ canonical_points.T).T + mat_prev[:3, 3]
 
+    for _ in range(HISTORY_LEN):
+        # Physics Step
+        for _ in range(5):
+            actor.add_force_at_point(total_force, actor.get_pose().p)
+            scene.step()
+            
+        mat_curr = actor.get_pose().to_transformation_matrix()
+        pts_curr = (mat_curr[:3, :3] @ canonical_points.T).T + mat_curr[:3, 3]
+        velocity_raw = pts_curr - pts_prev
+        
+        # Normalize and Store
+        pts_tensor = torch.tensor(pts_curr).float().to(device).unsqueeze(0) # [1, N, 3]
+        vel_tensor = torch.tensor(velocity_raw).float().to(device).unsqueeze(0)
+        
+        norm_x = (pts_tensor - pos_mean) / pos_std
+        norm_v = (vel_tensor - vel_mean) / vel_std
+        
+        history_x.append(norm_x)
+        history_v.append(norm_v)
+        
+        # Save GT for vis
+        gt_trajectory.append(pts_curr)
+        
+        pts_prev = pts_curr
+
+    # Stack into Tensor: [1, H, N, 3]
+    curr_x_hist = torch.stack(history_x, dim=1)
+    curr_v_hist = torch.stack(history_v, dim=1)
+    
+    # 初始预测轨迹的起点就是 warmup 的最后一帧
+    # 我们需要反归一化存入 pred_trajectory 以便后续画图
+    last_x_real = (history_x[-1] * pos_std + pos_mean).cpu().numpy().squeeze(0)
+    pred_trajectory.append(last_x_real) # Frame 0 of prediction
+
+    frames = 60
+    print("Running rollout...")
+    
+    for _ in range(frames):
+        # --- A. GT Simulation (Continued) ---
         for _ in range(5):
             actor.add_force_at_point(total_force, actor.get_pose().p)
             scene.step()
         
         mat_new = actor.get_pose().to_transformation_matrix()
         pts_new = (mat_new[:3, :3] @ canonical_points.T).T + mat_new[:3, 3]
-        pts_curr = pts_new
+        gt_trajectory.append(pts_new) # Save GT
 
-        # --- B. Pred ---
+        # --- B. Prediction (Autoregressive) ---
         with torch.no_grad():
-            pred_v_norm, _ = model(curr_x_norm, curr_v_norm, explicit_input, context_input)
+            # Input: [1, H, N, 3] -> Output: [1, N, 3] (Next Velocity)
+            pred_v_norm, _ = model(curr_x_hist, curr_v_hist, explicit_input, context_input)
             
-            # 积分更新
-            curr_x_norm = curr_x_norm + pred_v_norm * scale_ratio
-            curr_v_norm = pred_v_norm
+            # Integration
+            # Use the LATEST position in history to integrate
+            last_x_norm = curr_x_hist[:, -1] # [1, N, 3]
+            pred_x_norm = last_x_norm + pred_v_norm * scale_ratio
             
-            # 反归一化
-            pred_real = curr_x_norm * pos_std + pos_mean
+            # --- Update Sliding Window ---
+            # Remove oldest (index 0), append new (unsqueeze to maintain dim)
+            # pred_x_norm: [1, N, 3] -> [1, 1, N, 3]
+            curr_x_hist = torch.cat([curr_x_hist[:, 1:], pred_x_norm.unsqueeze(1)], dim=1)
+            curr_v_hist = torch.cat([curr_v_hist[:, 1:], pred_v_norm.unsqueeze(1)], dim=1)
+            
+            # Denormalize for Visualization
+            pred_real = pred_x_norm * pos_std + pos_mean
             pred_trajectory.append(pred_real.squeeze(0).cpu().numpy())
 
     print(f"Rendering video to {save_path}...")
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')
+    
+    # Align lengths
+    min_len = min(len(gt_trajectory), len(pred_trajectory))
+    gt_trajectory = gt_trajectory[:min_len]
+    pred_trajectory = pred_trajectory[:min_len]
     
     all_pts = np.concatenate(gt_trajectory + pred_trajectory)
     min_b, max_b = all_pts.min(0) - 1.0, all_pts.max(0) + 1.0
@@ -148,7 +184,7 @@ def make_rollout_video(checkpoint_path: str, save_path: str = "assets/simulation
         ax.set_xlim(min_b[0], max_b[0])
         ax.set_ylim(min_b[1], max_b[1])
         ax.set_zlim(min_b[2], max_b[2])
-        ax.set_title(f"Rollout Frame {frame}/{frames}\nGreen: GT | Red: Pred")
+        ax.set_title(f"Rollout Frame {frame}/{min_len}\nGreen: GT | Red: Pred")
         
         gt = gt_trajectory[frame]
         ax.scatter(gt[:, 0], gt[:, 1], gt[:, 2], c='green', alpha=0.4, label='GT')
@@ -159,7 +195,7 @@ def make_rollout_video(checkpoint_path: str, save_path: str = "assets/simulation
         ax.legend()
         return ax,
 
-    ani = FuncAnimation(fig, update, frames=frames, interval=100)
+    ani = FuncAnimation(fig, update, frames=min_len, interval=100)
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     ani.save(save_path, writer='pillow', fps=10)
     print("Done!")
