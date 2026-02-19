@@ -75,16 +75,7 @@ torchrun --nproc_per_node=8 train.py
 
 ## 6. 模型评估与可视化 (Evaluation)
 
-加载训练好的权重进行评估，并生成对比图：
-
-```bash
-python evaluate.py
-
-```
-
-*结果将保存为 `eval_result.png`。
-
-生成视频：
+加载训练好的权重进行评估，并生成视频：
 
 ```bash
 python make_video.py
