@@ -5,7 +5,7 @@ class GeometricConsistencyLoss(nn.Module):
     def __init__(self, lambda_rigid: float = 2.0, lambda_energy: float = 0.1):
         super().__init__()
         self.mse = nn.MSELoss()
-        self.l1 = nn.L1Loss()
+        self.l1 = nn.L1Loss() # 新增 L1 Loss，对异常值更宽容
         self.lambda_rigid = lambda_rigid
         self.lambda_energy = lambda_energy
 
@@ -20,6 +20,7 @@ class GeometricConsistencyLoss(nn.Module):
         target_dist = torch.cdist(target_x, target_x, p=2)
         rigid_loss = self.mse(pred_dist, target_dist)
         
+        # === 核心修改：温和的能量/速率约束 ===
         # 不要用 v^2 (动能)，改用 v 的模长 (速率)
         # 不要用 MSE (平方惩罚)，改用 L1 (线性惩罚) 或 Huber Loss
         # 这样即使模型偶尔预测出大速度，Loss 也不会爆炸
