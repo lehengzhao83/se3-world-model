@@ -53,12 +53,9 @@ pip install -r requirements.txt
 使用 SAPIEN 物理引擎生成训练和验证所需的点云序列数据：
 
 ```bash
-# 设置显卡可见（可选，防止多进程冲突）
-export CUDA_VISIBLE_DEVICES=0
-
-# 运行数据生成脚本
+# 运行数据生成脚本并可视化
 python scripts/generate_sapien_data.py
-
+python scripts/visualize_viser.py
 ```
 
 *执行成功后，会在 `data/` 目录下生成 `sapien_train.pt` 和 `sapien_val.pt`。*
