@@ -15,8 +15,8 @@ def sample_capsule_points(r: float, l: float, n: int) -> np.ndarray:
     return np.array(points, dtype=np.float32)
 
 def generate_trajectory_dataset(
-    num_trajectories: int = 10000,  # === 改进点：数据量 2k -> 10k ===
-    traj_len: int = 100, 
+    num_trajectories: int = 10000, 
+    traj_len: int = 60, 
     save_path: str = "data/sapien_train_seq.pt"
 ) -> None:
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -26,25 +26,22 @@ def generate_trajectory_dataset(
     engine.set_log_level("error")
     scene = engine.create_scene()
     scene.set_timestep(1 / 100.0)
+    
+    # 彻底移除地面，避免打破模型的 SE(3) 平移不变性
 
     canonical_points = sample_capsule_points(0.1, 0.2, 64)
-    
-    all_x = []
-    all_v = []
-    all_explicit = []
-    all_context = []
+    all_x, all_v, all_explicit, all_context = [], [], [], []
 
     builder = scene.create_actor_builder()
     builder.add_capsule_collision(radius=0.1, half_length=0.2)
-    builder.set_mass_and_inertia(1.0, sapien.Pose(), np.array([0.1, 0.1, 0.1], dtype=np.float32))
+    
+    # === 核心物理：设置不对称的转动惯量 (触发贾尼别科夫翻转) ===
+    builder.set_mass_and_inertia(1.0, sapien.Pose(), np.array([0.1, 0.5, 0.8], dtype=np.float32))
     actor = builder.build(name="dynamic_object")
 
     for _ in tqdm(range(num_trajectories)):
-        # 增加随机性范围，覆盖更多极端情况
         gravity_acc = np.random.randn(3).astype(np.float32)
         gravity_acc = gravity_acc / (np.linalg.norm(gravity_acc) + 1e-6) * 9.8
-        
-        # 风力范围增大，训练模型在更强干扰下的鲁棒性
         wind_force = np.random.randn(3).astype(np.float32) * 3.0 
         total_force = gravity_acc + wind_force
 
@@ -53,12 +50,13 @@ def generate_trajectory_dataset(
         q /= (np.linalg.norm(q) + 1e-6)
         actor.set_pose(sapien.Pose(pos, q))
         
-        # 初速度范围增大
-        v_init = np.random.randn(3).astype(np.float32) * 3.0
-        actor.set_velocity(v_init)
+        actor.set_velocity(np.random.randn(3).astype(np.float32) * 3.0)
         
-        traj_x = []
-        traj_v = []
+        # === 核心物理：赋予强烈的初始三轴角速度 ===
+        w_init = np.random.randn(3).astype(np.float32) * 12.0
+        actor.set_angular_velocity(w_init)
+        
+        traj_x, traj_v = [], []
         
         mat = actor.get_pose().to_transformation_matrix()
         pts_prev = (mat[:3, :3] @ canonical_points.T).T + mat[:3, 3]
@@ -74,7 +72,6 @@ def generate_trajectory_dataset(
             
             traj_x.append(pts_curr)
             traj_v.append(vel)
-            
             pts_prev = pts_curr
             
             for _ in range(5):
@@ -92,12 +89,8 @@ def generate_trajectory_dataset(
         "explicit": torch.tensor(np.stack(all_explicit)),
         "context": torch.tensor(np.stack(all_context))
     }
-
     torch.save(data_dict, save_path)
-    print(f"Saved to {save_path}")
 
 if __name__ == "__main__":
-    # 生成 10,000 条训练数据
-    generate_trajectory_dataset(10000, 20, "data/sapien_train_seq.pt")
-    # 验证集维持 200 条即可
-    generate_trajectory_dataset(200, 20, "data/sapien_val_seq.pt")
+    generate_trajectory_dataset(10000, 60, "data/sapien_train_seq.pt")
+    generate_trajectory_dataset(200, 60, "data/sapien_val_seq.pt")
