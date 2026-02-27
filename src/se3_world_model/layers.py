@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-
+import math
 
 def safe_norm(x: torch.Tensor, dim: int = -1, eps: float = 1e-6) -> torch.Tensor:
     """
@@ -122,4 +122,86 @@ class VNInvariant(nn.Module):
         
         # 将求出的标量特征输入普通的 MLP 中学习更高阶的不变特征
         out: torch.Tensor = self.mlp(inv)
+        return out
+    
+class VNGatedBlock(nn.Module):
+    """
+    基于标量门控的向量神经元模块 (Gated Vector Neuron Block)。
+    解决问题：打破孤立的通道线性映射，允许通过旋转不变量（模长/内积）来实现跨通道的非线性信息交换。
+    """
+    def __init__(self, channels: int) -> None:
+        super().__init__()
+        # 保持等变性的线性映射
+        self.linear = VNLinear(channels, channels)
+        
+        # 提取旋转不变量（模长）后，使用 MLP 学习跨通道的复杂标量交互逻辑
+        # 输出的 Sigmoid 作为门控信号 (Gating)
+        self.scalar_mlp = nn.Sequential(
+            nn.Linear(channels, channels * 2),
+            nn.SiLU(), # 非线性激活
+            nn.Linear(channels * 2, channels),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # 输入 x: [B, C, 3] (或者 [B*N, C, 3])
+        
+        # 1. 提取不变标量特征 (模长): [B, C]
+        # 无论坐标系如何旋转，向量的模长不变
+        inv_features = safe_norm(x, dim=-1).squeeze(-1) 
+        
+        # 2. 跨通道信息交换，生成门控权重: [B, C]
+        gate = self.scalar_mlp(inv_features)
+        
+        # 3. 对原始向量进行等变线性变换: [B, C, 3]
+        out_vec = self.linear(x)
+        
+        # 4. 门控调制 (Gating): [B, C, 1] * [B, C, 3] -> [B, C, 3]
+        # 标量乘以等变向量，结果依然严格保持 SE(3) 等变性
+        out_vec = out_vec * gate.unsqueeze(-1)
+        
+        # 残差连接
+        return x + out_vec
+
+
+class EquivariantTemporalAttention(nn.Module):
+    """
+    时间维度的 SE(3) 等变自注意力机制 (Temporal SE(3)-Attention)。
+    """
+    def __init__(self, channels: int, num_heads: int = 4) -> None:
+        super().__init__()
+        self.channels = channels
+        self.num_heads = num_heads
+        assert channels % num_heads == 0, "Channels must be divisible by num_heads"
+        
+        self.q_map = VNLinear(channels, channels)
+        self.k_map = VNLinear(channels, channels)
+        self.v_map = VNLinear(channels, channels)
+        self.out_map = VNLinear(channels, channels)
+
+    def forward(self, x_seq: torch.Tensor) -> torch.Tensor:
+        B_N, Seq, C, _ = x_seq.shape
+        Head_dim = C // self.num_heads
+        
+        # 1. 计算等变的 Q, K, V
+        # 【修复】：全部将 .view() 替换为 .reshape()，防止底层内存不连续导致的报错
+        Q = self.q_map(x_seq.reshape(B_N * Seq, C, 3)).reshape(B_N, Seq, self.num_heads, Head_dim, 3)
+        K = self.k_map(x_seq.reshape(B_N * Seq, C, 3)).reshape(B_N, Seq, self.num_heads, Head_dim, 3)
+        V = self.v_map(x_seq.reshape(B_N * Seq, C, 3)).reshape(B_N, Seq, self.num_heads, Head_dim, 3)
+
+        # 2. 计算 SE(3) 不变的注意力权重
+        # 【修复】：将 .view 替换为 .reshape
+        Q_flat = Q.reshape(B_N, Seq, self.num_heads, Head_dim * 3)
+        K_flat = K.reshape(B_N, Seq, self.num_heads, Head_dim * 3)
+        
+        attn_scores = torch.einsum('bqhd,bkhd->bhqk', Q_flat, K_flat) / math.sqrt(Head_dim * 3)
+        attn_weights = torch.softmax(attn_scores, dim=-1)
+
+        # 3. 在时间轴上聚合等变向量 V
+        out_V = torch.einsum('bhqk,bkhdc->bqhdc', attn_weights, V)
+        
+        # 4. 恢复形状并进行最终映射
+        out_V = out_V.reshape(B_N * Seq, C, 3)
+        out = self.out_map(out_V).reshape(B_N, Seq, C, 3) # 【修复】：将 .view 替换为 .reshape
+        
         return out
