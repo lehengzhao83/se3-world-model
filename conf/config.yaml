@@ -4,7 +4,7 @@ defaults:
   - override hydra/hydra_logging: disabled  
 
 training:
-  epochs: 150             
+  epochs: 500            
   batch_size: 32
   lr: 1e-4
   save_dir: "checkpoints"
@@ -15,8 +15,8 @@ training:
   curriculum:
     max_rollout_steps: 12 
     start_rollout_steps: 5
-    increase_every_epochs: 15        
-    teacher_forcing_decay_epochs: 100 # === 修改：延长衰减周期，给模型充分的过渡时间 ===
+    increase_every_epochs: 80        
+    teacher_forcing_decay_epochs: 250 
 
   loss_weights:
     pos: 2.0
@@ -31,11 +31,11 @@ model:
   history_len: 3          
 
 dataset:
-  train_path: "data/sapien_train_seq.pt"
-  val_path: "data/sapien_val_seq.pt"
+  train_path: "data/sapien_train_seq.h5"
+  val_path: "data/sapien_val_seq.h5"
 
 logger:
   project_name: "se3-world-model"
-  run_name: "seq2seq_noise_injection" 
+  run_name: "seq2seq_1M_training" 
   use_wandb: true
   use_tensorboard: true
