@@ -1,38 +1,41 @@
 import torch
 import torch.nn as nn
+from se3_world_model.layers import safe_norm
 
-
-class ContextualForceGenerator(nn.Module):
+class EquivariantContextModulator(nn.Module):
     """
-    隐式对称性破缺适配器 (Implicit Symmetry Breaking Adapter)。
-    用于从非等变的上下文信息（例如绝对坐标、时间步、物体ID、标量风力等）中
-    学习并生成物理空间中的“修正力”（Correction Forces）。
+    等变上下文调制器 (Equivariant Context Modulator)。
+    替代原有的非等变 Force Generator。
+    
+    它接收所有的标量上下文（风力大小、物体质量、时间步等），输出通道权重，
+    去动态缩放（Gating）等变向量特征。
+    标量乘向量的操作严格保留了 SE(3) 等变性。
     """
-    def __init__(self, context_dim: int, hidden_dim: int = 64) -> None:
+    def __init__(self, context_dim: int, latent_dim: int, hidden_dim: int = 64) -> None:
         super().__init__()
-        # 这是一个标准的多层感知机 (MLP)。
-        # 注意：这里故意使用了标准 MLP，因为它的操作不具备 SE(3) 等变性。
-        # 目的是刻意“打破”系统原有的严格对称性（比如风从某个特定方向吹来，旋转对称性就不复存在了）。
-        self.net = nn.Sequential(
+        # 输出的维度是 latent_dim，即为每一个等变特征通道预测一个标量权重
+        self.mlp = nn.Sequential(
             nn.Linear(context_dim, hidden_dim),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 3)  # 最终输出一个 3D 的力向量 (fx, fy, fz)
+            nn.SiLU(),
+            nn.Linear(hidden_dim, latent_dim),
+            nn.Sigmoid()  # 将调制权重限制在 (0, 1) 之间，起到门控抑制的作用
         )
 
-    def forward(self, context: torch.Tensor) -> torch.Tensor:
+    def forward(self, context: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
         """
-        前向传播：
         Args:
-            context: 标量上下文特征张量。
-        Returns:
-            生成的修正力向量张量。
+            context: [B, context_dim] 标量上下文
+            z: [B, latent_dim, 3] 需要被调制的等变特征
         """
-        # 通过非等变 MLP 网络计算力向量
-        f: torch.Tensor = self.net(context)
-        # 增加一个维度以适配后续的等变张量拼接操作 (变成类似 [Batch, 1个通道, 3D向量] 的结构)
-        return f.unsqueeze(1)
+        # weight: [B, latent_dim]
+        weight = self.mlp(context)
+        # 增加空间维度以进行广播相乘: [B, latent_dim, 1]
+        weight = weight.unsqueeze(-1)
+        
+        # 标量调制：[B, latent_dim, 3] * [B, latent_dim, 1]
+        return z * weight
 
 
 def inject_global_vectors(
@@ -40,20 +43,12 @@ def inject_global_vectors(
     vectors: torch.Tensor
 ) -> torch.Tensor:
     """
-    显式全局向量注入器 (Explicit Symmetry Breaking Injection)。
-    将已知的、具有物理意义的全局向量（如重力加速度、整体环境风力等）
-    作为 Type-1 特征（即标准的 3D 向量）直接与现有的等变隐特征进行拼接。
-
-    Args:
-        features: 当前模型的全局隐变量特征
-        vectors:  需要注入的全局显式向量特征
-    Returns:
-        拼接后的特征张量
+    显式等变向量注入器。
+    将归一化后的方向向量（Type-1）拼接到隐特征中。
     """
-    # 检查全局向量的 Batch 维度是否与隐特征的 Batch 维度一致
+    if vectors.ndim == 2:
+        vectors = vectors.unsqueeze(1)
     if vectors.shape[0] != features.shape[0]:
-        # 如果不一致（例如全局向量对整个 batch 是固定的），则在 Batch 维度上进行扩展（复制）
         vectors = vectors.expand(features.shape[0], -1, -1)
         
-    # 在通道维度 (dim=1) 上将特征和全局向量拼接起来，使得网络在演化时可以感知到这些全局物理量
     return torch.cat([features, vectors], dim=1)
