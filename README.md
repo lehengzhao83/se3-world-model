@@ -44,7 +44,7 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 pip install sapien==2.2.2
 
 # 3. 安装其他工具库
-pip install numpy transforms3d tqdm scipy matplotlib
+pip install numpy transforms3d tqdm scipy matplotlib h5py
 pip install -r requirements.txt
 ```
 
