@@ -28,8 +28,9 @@ class GeometricConsistencyLoss(nn.Module):
         pred_speed = torch.norm(pred_v, dim=-1)   # [B, N]
         target_speed = torch.norm(target_v, dim=-1) # [B, N]
         
-        # 使用 L1 Loss 约束速率一致性
-        energy_loss = self.l1(pred_speed, target_speed)
+        # === 核心修改：使用向量约束代替标量速率 ===
+        # 直接使用带有方向的 L1 Loss 约束速度向量
+        energy_loss = self.l1(pred_v, target_v)
         
         total_loss = traj_loss + \
                      self.lambda_rigid * rigid_loss + \
