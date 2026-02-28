@@ -22,7 +22,7 @@ class SapienSequenceDataset(Dataset):
             
             # std 是纯标量 (Size=1)，先 view 成 [1, 1, 1] 再通过 expand 广播成 [1, 1, 3]
             shared_vel_std = torch.tensor(np.array(f.attrs['vel_std'])).float().clamp(min=1e-6)
-            self.pos_std = shared_vel_std.view(1, 1, 1).expand(1, 1, 3)
+            self.pos_std = torch.tensor([1.0, 1.0, 1.0]).float().view(1, 1, 3)
             self.vel_std = shared_vel_std.view(1, 1, 1).expand(1, 1, 3)
             
             force_std = torch.tensor(np.array(f.attrs['force_std'])).float().clamp(min=1e-6)
