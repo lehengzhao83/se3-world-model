@@ -9,17 +9,14 @@ class SapienSequenceDataset(Dataset):
         self.data_path = data_path
         self.sub_seq_len = sub_seq_len
         
-        # 只在这里读取元数据和统计量，避免多进程 DataLoader 死锁
         with h5py.File(data_path, 'r') as f:
             self.num_traj = f['x'].shape[0]
             self.traj_len = f['x'].shape[1]
             
-            # 读取在线计算好的统计量
             self.pos_mean = torch.tensor(np.array(f.attrs['pos_mean'])).float().view(1, 1, 3)
             self.vel_mean = torch.tensor(np.array(f.attrs['vel_mean'])).float().view(1, 1, 3)
             self.force_mean = torch.tensor(np.array(f.attrs['force_mean'])).float().view(1, 1, 3)
             
-            # std 是纯标量，广播成 [1, 1, 3]
             shared_vel_std = torch.tensor(np.array(f.attrs['vel_std'])).float().clamp(min=1e-6)
             self.pos_std = torch.tensor([1.0, 1.0, 1.0]).float().view(1, 1, 3)
             self.vel_std = shared_vel_std.view(1, 1, 1).expand(1, 1, 3)
@@ -44,9 +41,9 @@ class SapienSequenceDataset(Dataset):
             explicit_seq = torch.from_numpy(f['explicit'][traj_idx, start_t:end_t])
             context_seq = torch.from_numpy(f['context'][traj_idx, start_t:end_t])
         
-        # 归一化逻辑
         x_norm = (x_seq - self.pos_mean) / self.pos_std
-        v_norm = (v_seq - self.vel_mean) / self.vel_std
+        # 【修复等变性】：绝对不能减去全局固定常数 vel_mean，只做标量缩放
+        v_norm = v_seq / self.vel_std
         f_norm = (f_seq - self.force_mean) / self.force_std
         
         return x_norm.float(), v_norm.float(), f_norm.float(), explicit_seq.float(), context_seq.float()
