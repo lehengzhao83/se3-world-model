@@ -12,8 +12,8 @@ from omegaconf import DictConfig, OmegaConf
 import wandb
 from torch.utils.tensorboard import SummaryWriter
 
-# 引入自动混合精度 (AMP) 模块加速海量数据训练
-from torch.cuda.amp import autocast, GradScaler 
+# 【修改】从 torch.amp 导入，这是目前的标准做法
+from torch import amp 
 
 # 将 src 目录添加到 Python 路径
 sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
@@ -84,11 +84,10 @@ def main(cfg: DictConfig):
     model = DDP(model, device_ids=[local_rank], output_device=local_rank)
     optimizer = optim.Adam(model.parameters(), lr=cfg.training.lr)
     
-    # 【新增】余弦退火学习率调度器：前期大学习率探索，后期小学习率收敛
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.training.epochs, eta_min=1e-6)
     
-    # 【新增】初始化 AMP 的梯度缩放器，防止 FP16 精度下梯度下溢 (Underflow)
-    scaler = GradScaler()
+    # 【修改】使用新的 GradScaler 接口，需指定设备类型为 'cuda'
+    scaler = amp.GradScaler('cuda')
     
     criterion_vel = nn.MSELoss() 
     criterion_pos = GeometricConsistencyLoss(
@@ -150,11 +149,11 @@ def main(cfg: DictConfig):
                     input_v_hist = curr_v_hist
                     input_f_hist = curr_f_hist
 
-                # 【重构】使用 autocast 开启前向传播的自动混合精度 (FP16)
-                with autocast():
+                # 【修改】使用新的 autocast 接口，需指定设备类型为 'cuda'
+                with amp.autocast('cuda'):
                     pred_v_norm, _ = model(input_x_hist, input_v_hist, input_f_hist, curr_expl, curr_ctx)
                 
-                # 【重构】将网络输出强转回 FP32，保护物理积分与 Loss 计算的数值稳定性
+                # 网络输出强转回 FP32 确保计算稳定性
                 pred_v_norm = pred_v_norm.float()
                 
                 last_x = curr_x_hist[:, -1] 
@@ -164,13 +163,18 @@ def main(cfg: DictConfig):
                 loss_v = criterion_vel(pred_v_norm, target_v)
                 loss_x_total, _, loss_rigid, loss_energy = criterion_pos(next_x, target_x, pred_v_norm, target_v)
                 
-                step_loss = loss_v + (cfg.training.loss_weights.pos * loss_x_total)
+                pos_mean = train_dataset.pos_mean.to(next_x.device)
+                pos_std = train_dataset.pos_std.to(next_x.device)
+                pred_x_real = next_x * pos_std + pos_mean
+
+                ground_penalty = torch.relu(-pred_x_real[..., 2]).mean()
+                step_loss = loss_v + (cfg.training.loss_weights.pos * loss_x_total) + 10.0 * ground_penalty
                 batch_loss += step_loss
                 
                 if torch.rand(1).item() < teacher_forcing_ratio:
                     next_v_in, next_x_in = target_v, target_x
                 else:
-                    next_v_in, next_x_in = pred_v_norm.detach(), next_x.detach()
+                    next_v_in, next_x_in = pred_v_norm, next_x
 
                 curr_x_hist = torch.cat([curr_x_hist[:, 1:], next_x_in.unsqueeze(1)], dim=1)
                 curr_v_hist = torch.cat([curr_v_hist[:, 1:], next_v_in.unsqueeze(1)], dim=1)
@@ -178,14 +182,12 @@ def main(cfg: DictConfig):
 
             final_loss = batch_loss / current_rollout_steps
             
-            # 【重构】使用 scaler 进行反向传播
+            # 使用 scaler 进行反向传播
             scaler.scale(final_loss).backward()
             
-            # 【重构】梯度裁剪前需要先 unscale
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.training.grad_clip)
             
-            # 【重构】使用 scaler.step 更新权重并 update scaler
             scaler.step(optimizer)
             scaler.update()
             
@@ -197,13 +199,11 @@ def main(cfg: DictConfig):
                         "train/loss": final_loss.item(),
                         "train/rollout_steps": current_rollout_steps,
                         "train/tf_ratio": teacher_forcing_ratio,
-                        "train/lr": optimizer.param_groups[0]['lr'] # 记录学习率变化
+                        "train/lr": optimizer.param_groups[0]['lr']
                     }, step=global_step)
             global_step += 1
 
         avg_train_loss = epoch_loss / len(train_loader)
-        
-        # 【新增】每个 Epoch 结束后更新学习率
         scheduler.step()
 
         # ------------------- 验证阶段 (Validation) -------------------
@@ -235,8 +235,8 @@ def main(cfg: DictConfig):
                     curr_expl = explicit_seq[:, ctx_idx]
                     curr_ctx = context_seq[:, ctx_idx]
                     
-                    # 【重构】验证同样开启 AMP 加速
-                    with autocast():
+                    # 【修改】验证同样使用新的 autocast 接口
+                    with amp.autocast('cuda'):
                         pred_v_norm, _ = model(curr_x_hist, curr_v_hist, curr_f_hist, curr_expl, curr_ctx)
                     pred_v_norm = pred_v_norm.float()
                     
