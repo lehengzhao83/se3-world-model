@@ -15,12 +15,11 @@ class SapienSequenceDataset(Dataset):
             self.traj_len = f['x'].shape[1]
             
             # 读取在线计算好的统计量
-            # mean 是形状为 (3,) 的向量，可以直接 view 成 [1, 1, 3]
             self.pos_mean = torch.tensor(np.array(f.attrs['pos_mean'])).float().view(1, 1, 3)
             self.vel_mean = torch.tensor(np.array(f.attrs['vel_mean'])).float().view(1, 1, 3)
             self.force_mean = torch.tensor(np.array(f.attrs['force_mean'])).float().view(1, 1, 3)
             
-            # std 是纯标量 (Size=1)，先 view 成 [1, 1, 1] 再通过 expand 广播成 [1, 1, 3]
+            # std 是纯标量，广播成 [1, 1, 3]
             shared_vel_std = torch.tensor(np.array(f.attrs['vel_std'])).float().clamp(min=1e-6)
             self.pos_std = torch.tensor([1.0, 1.0, 1.0]).float().view(1, 1, 3)
             self.vel_std = shared_vel_std.view(1, 1, 1).expand(1, 1, 3)
@@ -33,7 +32,6 @@ class SapienSequenceDataset(Dataset):
         return self.num_traj * samples_per_traj
 
     def __getitem__(self, idx: int):
-        # 懒加载：每次被调用时打开文件读取对应切片 (流式读取)
         with h5py.File(self.data_path, 'r') as f:
             samples_per_traj = self.traj_len - self.sub_seq_len
             traj_idx = idx // samples_per_traj     
