@@ -86,7 +86,8 @@ class SE3WorldModel(nn.Module):
         rigid_params = self.decoder(z_next)
         
         dv_cm = rigid_params[:, 0:1, :]
-        theta = rigid_params[:, 1:2, :]
+        # 放大旋转轴角响应，跳出“只平移”的局部最优
+        theta = rigid_params[:, 1:2, :] * 10.0
 
         # ---------- 以下罗德里格斯旋转公式部分保持你的原代码不变 ----------
         x_curr = x_history[:, -1]
