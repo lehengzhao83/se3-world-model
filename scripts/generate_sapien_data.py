@@ -173,7 +173,7 @@ def generate_trajectory_dataset(
         print("Dataset generation completed successfully!")
 
 if __name__ == "__main__":
-    # 生成 10000 条训练数据 (HDF5)
-    generate_trajectory_dataset(10000, 60, "data/sapien_train_seq.h5")
-    # 生成 200 条验证数据 (HDF5)
-    generate_trajectory_dataset(200, 60, "data/sapien_val_seq.h5")
+    # 生成 100000 条训练数据 (HDF5)
+    generate_trajectory_dataset(100000, 60, "data/sapien_train_seq.h5")
+    # 生成 2000 条验证数据 (HDF5)
+    generate_trajectory_dataset(2000, 60, "data/sapien_val_seq.h5")
