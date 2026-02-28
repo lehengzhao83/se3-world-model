@@ -77,11 +77,11 @@ def generate_trajectory_dataset(
 
         # === 4. 开始生成轨迹 ===
         for i in tqdm(range(num_trajectories)):
-            # --- 4.1 随机化物理环境参数 ---
-            gravity_acc = np.random.randn(3).astype(np.float32)
-            gravity_acc = gravity_acc / (np.linalg.norm(gravity_acc) + 1e-6) * 9.8 
+            # 找到 --- 4.1 随机化物理环境参数 --- 部分并替换
+            # 重力严格向下，防止模型学到“向天上掉”或“横向摔”的错误物理
+            gravity_acc = np.array([0.0, 0.0, np.random.uniform(-10.0, -9.0)], dtype=np.float32)
             wind_force = np.random.randn(3).astype(np.float32) * 3.0 
-            total_force = gravity_acc + wind_force
+            total_force = gravity_acc + wind_force  
 
             # --- 4.2 随机化初始状态 ---
             pos = np.random.randn(3).astype(np.float32) * 0.5
@@ -173,7 +173,7 @@ def generate_trajectory_dataset(
         print("Dataset generation completed successfully!")
 
 if __name__ == "__main__":
-    # 生成 100000 条训练数据 (HDF5)
-    generate_trajectory_dataset(100000, 60, "data/sapien_train_seq.h5")
-    # 生成 2000 条验证数据 (HDF5)
-    generate_trajectory_dataset(2000, 60, "data/sapien_val_seq.h5")
+    # 生成 1000 训练数据 (HDF5)
+    generate_trajectory_dataset(1000, 60, "data/sapien_train_seq.h5")
+    # 生成 20 条验证数据 (HDF5)
+    generate_trajectory_dataset(20, 60, "data/sapien_val_seq.h5")
