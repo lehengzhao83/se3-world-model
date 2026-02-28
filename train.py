@@ -12,7 +12,7 @@ from omegaconf import DictConfig, OmegaConf
 import wandb
 from torch.utils.tensorboard import SummaryWriter
 
-# 【修改】从 torch.amp 导入，这是目前的标准做法
+# 从 torch.amp 导入
 from torch import amp 
 
 # 将 src 目录添加到 Python 路径
@@ -86,7 +86,6 @@ def main(cfg: DictConfig):
     
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.training.epochs, eta_min=1e-6)
     
-    # 【修改】使用新的 GradScaler 接口，需指定设备类型为 'cuda'
     scaler = amp.GradScaler('cuda')
     
     criterion_vel = nn.MSELoss() 
@@ -118,7 +117,7 @@ def main(cfg: DictConfig):
         for batch_idx, (x_seq, v_seq, f_seq, explicit_seq, context_seq) in enumerate(train_loader):
             x_seq = x_seq.to(device, non_blocking=True)
             v_seq = v_seq.to(device, non_blocking=True)
-            f_seq = f_seq.to(device, non_blocking=True)
+            # f_seq 虽然拿出来了，但不再传入模型
             explicit_seq = explicit_seq.to(device, non_blocking=True)
             context_seq = context_seq.to(device, non_blocking=True)
 
@@ -126,7 +125,7 @@ def main(cfg: DictConfig):
             
             curr_x_hist = x_seq[:, 0:history_len] 
             curr_v_hist = v_seq[:, 0:history_len]
-            curr_f_hist = f_seq[:, 0:history_len]
+            # 彻底删除了 curr_f_hist
             
             batch_loss = 0.0
             
@@ -134,7 +133,6 @@ def main(cfg: DictConfig):
                 target_idx = history_len + t
                 target_v = v_seq[:, target_idx]
                 target_x = x_seq[:, target_idx] 
-                target_f = f_seq[:, target_idx] 
                 
                 ctx_idx = target_idx - 1
                 curr_expl = explicit_seq[:, ctx_idx]
@@ -143,17 +141,14 @@ def main(cfg: DictConfig):
                 if noise_std > 0:
                     input_x_hist = curr_x_hist.clone() + torch.randn_like(curr_x_hist) * noise_std
                     input_v_hist = curr_v_hist.clone() + torch.randn_like(curr_v_hist) * noise_std
-                    input_f_hist = curr_f_hist.clone() + torch.randn_like(curr_f_hist) * noise_std
                 else:
                     input_x_hist = curr_x_hist
                     input_v_hist = curr_v_hist
-                    input_f_hist = curr_f_hist
 
-                # 【修改】使用新的 autocast 接口，需指定设备类型为 'cuda'
+                # 【修复】：去掉了 input_f_hist，只传 4 个外部参数
                 with amp.autocast('cuda'):
-                    pred_v_norm, _ = model(input_x_hist, input_v_hist, input_f_hist, curr_expl, curr_ctx)
+                    pred_v_norm, _ = model(input_x_hist, input_v_hist, curr_expl, curr_ctx)
                 
-                # 网络输出强转回 FP32 确保计算稳定性
                 pred_v_norm = pred_v_norm.float()
                 
                 last_x = curr_x_hist[:, -1] 
@@ -176,15 +171,13 @@ def main(cfg: DictConfig):
                 else:
                     next_v_in, next_x_in = pred_v_norm, next_x
 
+                # 【修复】：去掉 curr_f_hist 的状态更新
                 curr_x_hist = torch.cat([curr_x_hist[:, 1:], next_x_in.unsqueeze(1)], dim=1)
                 curr_v_hist = torch.cat([curr_v_hist[:, 1:], next_v_in.unsqueeze(1)], dim=1)
-                curr_f_hist = torch.cat([curr_f_hist[:, 1:], target_f.unsqueeze(1)], dim=1)
 
             final_loss = batch_loss / current_rollout_steps
             
-            # 使用 scaler 进行反向传播
             scaler.scale(final_loss).backward()
-            
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.training.grad_clip)
             
@@ -215,13 +208,12 @@ def main(cfg: DictConfig):
             for x_seq, v_seq, f_seq, explicit_seq, context_seq in val_loader:
                 x_seq = x_seq.to(device, non_blocking=True)
                 v_seq = v_seq.to(device, non_blocking=True)
-                f_seq = f_seq.to(device, non_blocking=True)
                 explicit_seq = explicit_seq.to(device, non_blocking=True)
                 context_seq = context_seq.to(device, non_blocking=True)
 
                 curr_x_hist = x_seq[:, 0:history_len] 
                 curr_v_hist = v_seq[:, 0:history_len]
-                curr_f_hist = f_seq[:, 0:history_len]
+                # 彻底删除了 curr_f_hist
                 
                 batch_loss = 0.0
                 
@@ -229,15 +221,14 @@ def main(cfg: DictConfig):
                     target_idx = history_len + t
                     target_v = v_seq[:, target_idx]
                     target_x = x_seq[:, target_idx] 
-                    target_f = f_seq[:, target_idx]
                     
                     ctx_idx = target_idx - 1
                     curr_expl = explicit_seq[:, ctx_idx]
                     curr_ctx = context_seq[:, ctx_idx]
                     
-                    # 【修改】验证同样使用新的 autocast 接口
+                    # 【修复】：验证循环前向传播使用 curr_x_hist 和 curr_v_hist，且去掉了 f_hist
                     with amp.autocast('cuda'):
-                        pred_v_norm, _ = model(curr_x_hist, curr_v_hist, curr_f_hist, curr_expl, curr_ctx)
+                        pred_v_norm, _ = model(curr_x_hist, curr_v_hist, curr_expl, curr_ctx)
                     pred_v_norm = pred_v_norm.float()
                     
                     last_x = curr_x_hist[:, -1] 
@@ -252,9 +243,9 @@ def main(cfg: DictConfig):
                     
                     next_v_in, next_x_in = pred_v_norm, next_x
 
+                    # 【修复】：去掉 curr_f_hist 的更新
                     curr_x_hist = torch.cat([curr_x_hist[:, 1:], next_x_in.unsqueeze(1)], dim=1)
                     curr_v_hist = torch.cat([curr_v_hist[:, 1:], next_v_in.unsqueeze(1)], dim=1)
-                    curr_f_hist = torch.cat([curr_f_hist[:, 1:], target_f.unsqueeze(1)], dim=1)
 
                 val_loss_total += (batch_loss / current_rollout_steps).item()
                 val_steps += 1
