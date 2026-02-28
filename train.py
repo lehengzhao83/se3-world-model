@@ -12,10 +12,8 @@ from omegaconf import DictConfig, OmegaConf
 import wandb
 from torch.utils.tensorboard import SummaryWriter
 
-# 从 torch.amp 导入
 from torch import amp 
 
-# 将 src 目录添加到 Python 路径
 sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 
 from se3_world_model.dataset import SapienSequenceDataset
@@ -58,7 +56,6 @@ def main(cfg: DictConfig):
     
     seq_len_needed = max_rollout + history_len
 
-    # ================= 数据集与 Dataloader =================
     train_dataset = SapienSequenceDataset(data_path=cfg.dataset.train_path, sub_seq_len=seq_len_needed)
     val_dataset = SapienSequenceDataset(data_path=cfg.dataset.val_path, sub_seq_len=seq_len_needed)
     
@@ -70,9 +67,7 @@ def main(cfg: DictConfig):
 
     pos_std = train_dataset.pos_std.to(device)
     vel_std = train_dataset.vel_std.to(device)
-    vel_mean = train_dataset.vel_mean.to(device)
     
-    # ================= 模型、优化器与调度器 =================
     model = SE3WorldModel(
         num_points=cfg.model.num_points, 
         latent_dim=cfg.model.latent_dim, 
@@ -97,7 +92,6 @@ def main(cfg: DictConfig):
     best_val_loss = float("inf")
     global_step = 0
     
-    # ================= 训练与验证循环 =================
     for epoch in range(cfg.training.epochs):
         train_sampler.set_epoch(epoch)
         
@@ -110,14 +104,12 @@ def main(cfg: DictConfig):
         tf_decay_steps = float(curr_config.teacher_forcing_decay_epochs)
         teacher_forcing_ratio = max(0.0, 1.0 - epoch / tf_decay_steps)
         
-        # ------------------- 训练阶段 (Training) -------------------
         model.train()
         epoch_loss = 0.0
         
         for batch_idx, (x_seq, v_seq, f_seq, explicit_seq, context_seq) in enumerate(train_loader):
             x_seq = x_seq.to(device, non_blocking=True)
             v_seq = v_seq.to(device, non_blocking=True)
-            # f_seq 虽然拿出来了，但不再传入模型
             explicit_seq = explicit_seq.to(device, non_blocking=True)
             context_seq = context_seq.to(device, non_blocking=True)
 
@@ -125,7 +117,6 @@ def main(cfg: DictConfig):
             
             curr_x_hist = x_seq[:, 0:history_len] 
             curr_v_hist = v_seq[:, 0:history_len]
-            # 彻底删除了 curr_f_hist
             
             batch_loss = 0.0
             
@@ -145,14 +136,15 @@ def main(cfg: DictConfig):
                     input_x_hist = curr_x_hist
                     input_v_hist = curr_v_hist
 
-                # 【修复】：去掉了 input_f_hist，只传 4 个外部参数
                 with amp.autocast('cuda'):
-                    pred_v_norm, _ = model(input_x_hist, input_v_hist, curr_expl, curr_ctx)
+                    # 【代码适配】：将 vel_std 传入模型进行量纲统一
+                    pred_v_norm, _ = model(input_x_hist, input_v_hist, curr_expl, curr_ctx, vel_std)
                 
                 pred_v_norm = pred_v_norm.float()
                 
                 last_x = curr_x_hist[:, -1] 
-                pred_v_real = pred_v_norm * vel_std + vel_mean
+                # 【代码适配】：去掉了 vel_mean，只有标量相乘
+                pred_v_real = pred_v_norm * vel_std 
                 next_x = last_x + pred_v_real / pos_std
                 
                 loss_v = criterion_vel(pred_v_norm, target_v)
@@ -171,7 +163,6 @@ def main(cfg: DictConfig):
                 else:
                     next_v_in, next_x_in = pred_v_norm, next_x
 
-                # 【修复】：去掉 curr_f_hist 的状态更新
                 curr_x_hist = torch.cat([curr_x_hist[:, 1:], next_x_in.unsqueeze(1)], dim=1)
                 curr_v_hist = torch.cat([curr_v_hist[:, 1:], next_v_in.unsqueeze(1)], dim=1)
 
@@ -199,7 +190,6 @@ def main(cfg: DictConfig):
         avg_train_loss = epoch_loss / len(train_loader)
         scheduler.step()
 
-        # ------------------- 验证阶段 (Validation) -------------------
         model.eval()
         val_loss_total = 0.0
         val_steps = 0
@@ -213,7 +203,6 @@ def main(cfg: DictConfig):
 
                 curr_x_hist = x_seq[:, 0:history_len] 
                 curr_v_hist = v_seq[:, 0:history_len]
-                # 彻底删除了 curr_f_hist
                 
                 batch_loss = 0.0
                 
@@ -226,13 +215,14 @@ def main(cfg: DictConfig):
                     curr_expl = explicit_seq[:, ctx_idx]
                     curr_ctx = context_seq[:, ctx_idx]
                     
-                    # 【修复】：验证循环前向传播使用 curr_x_hist 和 curr_v_hist，且去掉了 f_hist
                     with amp.autocast('cuda'):
-                        pred_v_norm, _ = model(curr_x_hist, curr_v_hist, curr_expl, curr_ctx)
+                        # 【代码适配】：验证集同样传入 vel_std
+                        pred_v_norm, _ = model(curr_x_hist, curr_v_hist, curr_expl, curr_ctx, vel_std)
                     pred_v_norm = pred_v_norm.float()
                     
                     last_x = curr_x_hist[:, -1] 
-                    pred_v_real = pred_v_norm * vel_std + vel_mean
+                    # 【代码适配】：去掉 vel_mean
+                    pred_v_real = pred_v_norm * vel_std 
                     next_x = last_x + pred_v_real / pos_std
                     
                     loss_v = criterion_vel(pred_v_norm, target_v)
@@ -243,7 +233,6 @@ def main(cfg: DictConfig):
                     
                     next_v_in, next_x_in = pred_v_norm, next_x
 
-                    # 【修复】：去掉 curr_f_hist 的更新
                     curr_x_hist = torch.cat([curr_x_hist[:, 1:], next_x_in.unsqueeze(1)], dim=1)
                     curr_v_hist = torch.cat([curr_v_hist[:, 1:], next_v_in.unsqueeze(1)], dim=1)
 
@@ -256,7 +245,6 @@ def main(cfg: DictConfig):
         
         avg_val_loss = val_metrics[0].item() / max(val_metrics[1].item(), 1)
 
-        # ------------------- 记录与保存 -------------------
         if global_rank == 0:
             print(f"Epoch {epoch+1:03d} | Train Loss: {avg_train_loss:.6f} | Val Loss: {avg_val_loss:.6f} | LR: {optimizer.param_groups[0]['lr']:.2e}")
             
