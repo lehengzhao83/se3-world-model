@@ -4,24 +4,24 @@ defaults:
   - override hydra/hydra_logging: disabled  
 
 training:
-  epochs: 500            
-  batch_size: 32
+  epochs: 300          
+  batch_size: 64
   lr: 1e-4
   save_dir: "checkpoints"
   num_workers: 4
-  grad_clip: 0.1
-  noise_std: 0.01         
+  grad_clip: 5.0
+  noise_std: 0.03         
   
   curriculum:
     max_rollout_steps: 12 
-    start_rollout_steps: 5
-    increase_every_epochs: 80        
-    teacher_forcing_decay_epochs: 250 
+    start_rollout_steps: 3
+    increase_every_epochs: 20        
+    teacher_forcing_decay_epochs: 40   
 
   loss_weights:
     pos: 2.0
     rigid: 2.0
-    energy: 0.1
+    energy: 2.0
 
 model:
   num_points: 64
