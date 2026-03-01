@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-
 from se3_world_model.components import SE3Encoder
 from se3_world_model.forces import EquivariantContextModulator, inject_global_vectors
 from se3_world_model.layers import VNLinear, VNGatedBlock, safe_norm
@@ -34,13 +33,11 @@ class SE3WorldModel(nn.Module):
         self.context_modulator = EquivariantContextModulator(total_scalar_dim, latent_dim)
         self.decoder = SE3RigidDecoder(latent_dim)
 
-    # 【修复 1】：增加 vel_std, pos_mean, pos_std 参数以对齐外部调用
     def forward(self, x_history, v_history, explicit_vectors, implicit_context, vel_std=None, pos_mean=None, pos_std=None):
         B, H, N, _ = x_history.shape
         x_perm = x_history.permute(0, 2, 1, 3)
         v_perm = v_history.permute(0, 2, 1, 3)
         
-        # 【修复 2】：利用传入的统计量，提取真实物理世界中的 Z 轴绝对高度
         if pos_mean is not None and pos_std is not None:
             x_real = x_perm * pos_std.to(x_perm.device) + pos_mean.to(x_perm.device)
             z_height = x_real[:, :, -1, 2].mean(dim=1, keepdim=True)
@@ -74,7 +71,6 @@ class SE3WorldModel(nn.Module):
         v_cm = v_curr.mean(dim=1, keepdim=True)
         next_v_cm = v_cm + dv_cm
         
-        # 【修复 3】：避免轴角旋转向量的模长为 0 导致反向传播出现 NaN
         angle = torch.norm(theta, dim=-1, keepdim=True).clamp(min=1e-6)
         axis = theta / angle
         
@@ -92,15 +88,33 @@ class SE3WorldModel(nn.Module):
         
         R = I + sin_a * K + (1 - cos_a) * torch.bmm(K, K)
         r_rotated = torch.bmm(r, R.transpose(1, 2))
-        
-        # 提取纯粹的物理旋转位移
         rot_displacement = r_rotated - r
         
-        # 【致命修复点】：必须把物理位移映射回“归一化速度空间”！
         if vel_std is not None:
             rot_displacement = rot_displacement / vel_std.to(rot_displacement.device)
             
-        # 这样相加才是物理合法的（归一化质心速度 + 归一化旋转位移）
-        pred_v = next_v_cm + rot_displacement
+        # 1. 预测无约束状态下的速度
+        pred_v_unconstrained = next_v_cm + rot_displacement
         
-        return pred_v, z_next
+        # 2. 【核心重构：简化的刚体 SI 迭代求解器】
+        pred_v = pred_v_unconstrained.clone()
+        if pos_mean is not None and pos_std is not None and vel_std is not None:
+            # 还原到物理尺度进行碰撞检测
+            x_curr_real = x_curr * pos_std.to(x_curr.device) + pos_mean.to(x_curr.device)
+            v_real = pred_v * vel_std.to(x_curr.device)
+            
+            # 模拟物理引擎的 SI 迭代求解 (迭代 5 次)
+            for _ in range(5):
+                x_next_real = x_curr_real + v_real
+                # 寻找地面的穿透深度 (Z < 0)
+                penetration = torch.clamp(-x_next_real[..., 2], min=0.0) 
+                
+                # 由于是绝对刚体，找到穿透最深的点，对整个刚体的 Z 轴速度施加向上的冲量
+                # 这样所有点加的速度完全一致，100% 不会破坏刚体形状
+                max_pen, _ = penetration.max(dim=-1, keepdim=True) 
+                v_real[..., 2] += max_pen
+                
+            pred_v = v_real / vel_std.to(x_curr.device)
+
+        # 返回时多暴露 next_v_cm 和 R 给外部用于绝对刚性 Rollout
+        return pred_v, z_next, next_v_cm, R
