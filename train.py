@@ -20,6 +20,7 @@ from se3_world_model.dataset import SapienSequenceDataset
 from se3_world_model.model import SE3WorldModel
 from se3_world_model.loss import GeometricConsistencyLoss
 
+
 def setup_distributed():
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
         rank = int(os.environ["RANK"])            
@@ -32,7 +33,8 @@ def setup_distributed():
     return 0, 0, 1
 
 def cleanup_distributed():
-    if dist.is_initialized(): dist.destroy_process_group()
+    if dist.is_initialized(): 
+        dist.destroy_process_group()
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(cfg: DictConfig):
@@ -65,6 +67,7 @@ def main(cfg: DictConfig):
     train_loader = DataLoader(train_dataset, batch_size=cfg.training.batch_size, sampler=train_sampler, num_workers=cfg.training.num_workers, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=cfg.training.batch_size, sampler=val_sampler, num_workers=cfg.training.num_workers, pin_memory=True)
 
+    pos_mean = train_dataset.pos_mean.to(device)
     pos_std = train_dataset.pos_std.to(device)
     vel_std = train_dataset.vel_std.to(device)
     
@@ -78,12 +81,10 @@ def main(cfg: DictConfig):
     
     model = DDP(model, device_ids=[local_rank], output_device=local_rank)
     optimizer = optim.Adam(model.parameters(), lr=cfg.training.lr)
-    
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.training.epochs, eta_min=1e-6)
-    
     scaler = amp.GradScaler('cuda')
     
-    criterion_vel = nn.MSELoss() 
+    # 统一使用带有 L1 宽容约束的联合损失函数，移除多余的 criterion_vel
     criterion_pos = GeometricConsistencyLoss(
         lambda_rigid=cfg.training.loss_weights.rigid, 
         lambda_energy=cfg.training.loss_weights.energy
@@ -137,25 +138,25 @@ def main(cfg: DictConfig):
                     input_v_hist = curr_v_hist
 
                 with amp.autocast('cuda'):
-                    # 【代码适配】：将 vel_std 传入模型进行量纲统一
-                    pred_v_norm, _ = model(input_x_hist, input_v_hist, curr_expl, curr_ctx, vel_std)
+                    # 传入统计量以校准量纲和 Z轴高度
+                    pred_v_norm, _ = model(
+                        input_x_hist, input_v_hist, curr_expl, curr_ctx, 
+                        vel_std=vel_std, pos_mean=pos_mean, pos_std=pos_std
+                    )
                 
                 pred_v_norm = pred_v_norm.float()
                 
                 last_x = curr_x_hist[:, -1] 
-                # 【代码适配】：去掉了 vel_mean，只有标量相乘
                 pred_v_real = pred_v_norm * vel_std 
                 next_x = last_x + pred_v_real / pos_std
                 
-                loss_v = criterion_vel(pred_v_norm, target_v)
-                loss_x_total, _, loss_rigid, loss_energy = criterion_pos(next_x, target_x, pred_v_norm, target_v)
+                # 计算联合损失
+                loss_total, _, _, _ = criterion_pos(next_x, target_x, pred_v_norm, target_v)
                 
-                pos_mean = train_dataset.pos_mean.to(next_x.device)
-                pos_std = train_dataset.pos_std.to(next_x.device)
                 pred_x_real = next_x * pos_std + pos_mean
-
                 ground_penalty = torch.relu(-pred_x_real[..., 2]).mean()
-                step_loss = loss_v + (cfg.training.loss_weights.pos * loss_x_total) + 10.0 * ground_penalty
+                
+                step_loss = (cfg.training.loss_weights.pos * loss_total) + 10.0 * ground_penalty
                 batch_loss += step_loss
                 
                 if torch.rand(1).item() < teacher_forcing_ratio:
@@ -216,19 +217,18 @@ def main(cfg: DictConfig):
                     curr_ctx = context_seq[:, ctx_idx]
                     
                     with amp.autocast('cuda'):
-                        # 【代码适配】：验证集同样传入 vel_std
-                        pred_v_norm, _ = model(curr_x_hist, curr_v_hist, curr_expl, curr_ctx, vel_std)
+                        pred_v_norm, _ = model(
+                            curr_x_hist, curr_v_hist, curr_expl, curr_ctx, 
+                            vel_std=vel_std, pos_mean=pos_mean, pos_std=pos_std
+                        )
                     pred_v_norm = pred_v_norm.float()
                     
                     last_x = curr_x_hist[:, -1] 
-                    # 【代码适配】：去掉 vel_mean
                     pred_v_real = pred_v_norm * vel_std 
                     next_x = last_x + pred_v_real / pos_std
                     
-                    loss_v = criterion_vel(pred_v_norm, target_v)
-                    loss_x_total, _, _, _ = criterion_pos(next_x, target_x, pred_v_norm, target_v)
-                    
-                    step_loss = loss_v + (cfg.training.loss_weights.pos * loss_x_total)
+                    loss_total, _, _, _ = criterion_pos(next_x, target_x, pred_v_norm, target_v)
+                    step_loss = (cfg.training.loss_weights.pos * loss_total)
                     batch_loss += step_loss
                     
                     next_v_in, next_x_in = pred_v_norm, next_x
