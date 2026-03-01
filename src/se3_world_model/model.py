@@ -61,7 +61,7 @@ class SE3WorldModel(nn.Module):
         rigid_params = self.decoder(z_next)
         
         dv_cm = rigid_params[:, 0:1, :]
-        theta = rigid_params[:, 1:2, :] * 10.0
+        theta = rigid_params[:, 1:2, :]
 
         x_curr = x_history[:, -1]
         v_curr = v_history[:, -1]
