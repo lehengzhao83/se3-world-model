@@ -43,8 +43,8 @@ def make_rollout_video(checkpoint_path: str, save_path: str = "assets/simulation
     model = SE3WorldModel(
         num_points=NUM_POINTS,
         latent_dim=LATENT_DIM, 
-        num_global_vectors=1,
-        context_dim=3,
+        num_global_vectors=2, # 【修复】：改为 2 (重力 + 风力)
+        context_dim=1,        # 【修复】：改为 1 (占位符)
         history_len=HISTORY_LEN 
     ).to(device)
     
@@ -77,8 +77,11 @@ def make_rollout_video(checkpoint_path: str, save_path: str = "assets/simulation
 
     canonical_points = sample_capsule_points(0.1, 0.2, NUM_POINTS)
 
-    explicit_input = torch.tensor(gravity_np).float().to(device).view(1, 1, 3) 
-    context_input = torch.tensor(wind_np).float().to(device).view(1, 3)
+    # 【核心修复】：将重力和风力合并为维度 [1, 2, 3] 的等变向量，替代之前的硬编码输入
+    grav_tensor = torch.tensor(gravity_np).float().to(device).view(1, 1, 3) 
+    wind_tensor = torch.tensor(wind_np).float().to(device).view(1, 1, 3)
+    explicit_input = torch.cat([grav_tensor, wind_tensor], dim=1) # [1, 2, 3]
+    dummy_ctx = torch.ones(1, 1, device=device) # [1, 1] 占位符
 
     history_x, history_v = [], []
     gt_trajectory, pred_trajectory = [], []
@@ -134,8 +137,9 @@ def make_rollout_video(checkpoint_path: str, save_path: str = "assets/simulation
         gt_trajectory.append(pts_new) 
         
         with torch.no_grad():
+            # 【修复】：推理时传入更新后的 explicit_input 与 dummy_ctx
             pred_v_norm, _, next_v_cm_norm, R_pred = model(
-                curr_x_hist, curr_v_hist, explicit_input, context_input, 
+                curr_x_hist, curr_v_hist, explicit_input, dummy_ctx, 
                 vel_std=vel_std, pos_mean=pos_mean, pos_std=pos_std
             )
             
@@ -150,7 +154,6 @@ def make_rollout_video(checkpoint_path: str, save_path: str = "assets/simulation
             
             pred_x_norm = (torch.tensor(pred_pts_real).float().to(device).unsqueeze(0) - pos_mean) / pos_std
             
-            # 【核心修复】：加上 (pos_std / vel_std) 的归一化比例缩放
             pred_v_norm_step = (pred_x_norm - curr_x_hist[:, -1]) * (pos_std / vel_std)
             
             curr_x_hist = torch.cat([curr_x_hist[:, 1:], pred_x_norm.unsqueeze(1)], dim=1)
