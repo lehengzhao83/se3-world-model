@@ -102,7 +102,6 @@ def make_rollout_video(checkpoint_path: str, save_path: str = "assets/simulation
         vel_tensor = torch.tensor(velocity_raw).float().to(device).unsqueeze(0)
         
         norm_x = (pts_tensor - pos_mean) / pos_std
-        # 【代码适配】：去除 vel_mean
         norm_v = vel_tensor / vel_std
         
         history_x.append(norm_x)
@@ -131,11 +130,13 @@ def make_rollout_video(checkpoint_path: str, save_path: str = "assets/simulation
         gt_trajectory.append(pts_new) 
         
         with torch.no_grad():
-            # 【代码适配】：传入 vel_std
-            pred_v_norm, _ = model(curr_x_hist, curr_v_hist, explicit_input, context_input, vel_std)
+            # 同样向模型传入物理量纲参数
+            pred_v_norm, _ = model(
+                curr_x_hist, curr_v_hist, explicit_input, context_input, 
+                vel_std=vel_std, pos_mean=pos_mean, pos_std=pos_std
+            )
             
             last_x_norm = curr_x_hist[:, -1] 
-            # 【代码适配】：去掉 vel_mean
             pred_v_real = pred_v_norm * vel_std 
             pred_x_norm = last_x_norm + pred_v_real / pos_std
             
