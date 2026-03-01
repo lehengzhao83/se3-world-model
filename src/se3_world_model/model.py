@@ -96,25 +96,8 @@ class SE3WorldModel(nn.Module):
         # 1. 预测无约束状态下的速度
         pred_v_unconstrained = next_v_cm + rot_displacement
         
-        # 2. 【核心重构：简化的刚体 SI 迭代求解器】
-        pred_v = pred_v_unconstrained.clone()
-        if pos_mean is not None and pos_std is not None and vel_std is not None:
-            # 还原到物理尺度进行碰撞检测
-            x_curr_real = x_curr * pos_std.to(x_curr.device) + pos_mean.to(x_curr.device)
-            v_real = pred_v * vel_std.to(x_curr.device)
-            
-            # 模拟物理引擎的 SI 迭代求解 (迭代 5 次)
-            for _ in range(5):
-                x_next_real = x_curr_real + v_real
-                # 寻找地面的穿透深度 (Z < 0)
-                penetration = torch.clamp(-x_next_real[..., 2], min=0.0) 
-                
-                # 由于是绝对刚体，找到穿透最深的点，对整个刚体的 Z 轴速度施加向上的冲量
-                # 这样所有点加的速度完全一致，100% 不会破坏刚体形状
-                max_pen, _ = penetration.max(dim=-1, keepdim=True) 
-                v_real[..., 2] += max_pen
-                
-            pred_v = v_real / vel_std.to(x_curr.device)
-
+        # 2. 【核心重构：移除强硬的 SI 求解器，打通碰撞学习的梯度网络】
+        pred_v = pred_v_unconstrained
+        
         # 返回时多暴露 next_v_cm 和 R 给外部用于绝对刚性 Rollout
         return pred_v, z_next, next_v_cm, R
