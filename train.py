@@ -84,7 +84,7 @@ def main(cfg: DictConfig):
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.training.epochs, eta_min=1e-6)
     scaler = amp.GradScaler('cuda')
     
-    # 统一使用带有 L1 宽容约束的联合损失函数，移除多余的 criterion_vel
+    # 统一使用带有 L1 宽容约束的联合损失函数
     criterion_pos = GeometricConsistencyLoss(
         lambda_rigid=cfg.training.loss_weights.rigid, 
         lambda_energy=cfg.training.loss_weights.energy
@@ -138,8 +138,8 @@ def main(cfg: DictConfig):
                     input_v_hist = curr_v_hist
 
                 with amp.autocast('cuda'):
-                    # 传入统计量以校准量纲和 Z轴高度
-                    pred_v_norm, _ = model(
+                    # 【核心修改】：接收 4 个返回值，提取速度预测值
+                    pred_v_norm, _, _, _ = model(
                         input_x_hist, input_v_hist, curr_expl, curr_ctx, 
                         vel_std=vel_std, pos_mean=pos_mean, pos_std=pos_std
                     )
@@ -153,10 +153,8 @@ def main(cfg: DictConfig):
                 # 计算联合损失
                 loss_total, _, _, _ = criterion_pos(next_x, target_x, pred_v_norm, target_v)
                 
-                pred_x_real = next_x * pos_std + pos_mean
-                ground_penalty = torch.relu(-pred_x_real[..., 2]).mean()
-                
-                step_loss = (cfg.training.loss_weights.pos * loss_total) + 10.0 * ground_penalty
+                # 【核心修改】：已彻底移除 ground_penalty
+                step_loss = cfg.training.loss_weights.pos * loss_total
                 batch_loss += step_loss
                 
                 if torch.rand(1).item() < teacher_forcing_ratio:
@@ -217,7 +215,8 @@ def main(cfg: DictConfig):
                     curr_ctx = context_seq[:, ctx_idx]
                     
                     with amp.autocast('cuda'):
-                        pred_v_norm, _ = model(
+                        # 【核心修改】：接收 4 个返回值，提取速度预测值
+                        pred_v_norm, _, _, _ = model(
                             curr_x_hist, curr_v_hist, curr_expl, curr_ctx, 
                             vel_std=vel_std, pos_mean=pos_mean, pos_std=pos_std
                         )
