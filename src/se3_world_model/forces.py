@@ -19,8 +19,7 @@ class EquivariantContextModulator(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
-            nn.Linear(hidden_dim, latent_dim),
-            nn.Sigmoid()  # 将调制权重限制在 (0, 1) 之间，起到门控抑制的作用
+            nn.Linear(hidden_dim, latent_dim)
         )
 
     def forward(self, context: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
