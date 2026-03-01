@@ -74,8 +74,8 @@ def main(cfg: DictConfig):
     model = SE3WorldModel(
         num_points=cfg.model.num_points, 
         latent_dim=cfg.model.latent_dim, 
-        num_global_vectors=cfg.model.num_global_vectors, 
-        context_dim=cfg.model.context_dim,
+        num_global_vectors=2, # 【修复1】：重力 (1) + 风力 (1)
+        context_dim=1,        # 【修复1】：占位符标量维度
         history_len=history_len
     ).to(device)
     
@@ -84,7 +84,6 @@ def main(cfg: DictConfig):
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.training.epochs, eta_min=1e-6)
     scaler = amp.GradScaler('cuda')
     
-    # 统一使用带有 L1 宽容约束的联合损失函数
     criterion_pos = GeometricConsistencyLoss(
         lambda_rigid=cfg.training.loss_weights.rigid, 
         lambda_energy=cfg.training.loss_weights.energy
@@ -130,6 +129,11 @@ def main(cfg: DictConfig):
                 curr_expl = explicit_seq[:, ctx_idx]
                 curr_ctx = context_seq[:, ctx_idx]
                 
+                # 【核心修复 2】：将风力转化为明确的 SE(3) 等变向量
+                wind_expl = curr_ctx.unsqueeze(1)    # [B, 1, 3]
+                combined_expl = torch.cat([curr_expl, wind_expl], dim=1) # [B, 2, 3]
+                dummy_ctx = torch.ones(x_seq.shape[0], 1, device=device)
+
                 if noise_std > 0:
                     input_x_hist = curr_x_hist.clone() + torch.randn_like(curr_x_hist) * noise_std
                     input_v_hist = curr_v_hist.clone() + torch.randn_like(curr_v_hist) * noise_std
@@ -138,9 +142,8 @@ def main(cfg: DictConfig):
                     input_v_hist = curr_v_hist
 
                 with amp.autocast('cuda'):
-                    # 【核心修改】：接收 4 个返回值，提取速度预测值
                     pred_v_norm, _, _, _ = model(
-                        input_x_hist, input_v_hist, curr_expl, curr_ctx, 
+                        input_x_hist, input_v_hist, combined_expl, dummy_ctx, 
                         vel_std=vel_std, pos_mean=pos_mean, pos_std=pos_std
                     )
                 
@@ -150,10 +153,7 @@ def main(cfg: DictConfig):
                 pred_v_real = pred_v_norm * vel_std 
                 next_x = last_x + pred_v_real / pos_std
                 
-                # 计算联合损失
                 loss_total, _, _, _ = criterion_pos(next_x, target_x, pred_v_norm, target_v)
-                
-                # 【核心修改】：已彻底移除 ground_penalty
                 step_loss = cfg.training.loss_weights.pos * loss_total
                 batch_loss += step_loss
                 
@@ -214,10 +214,14 @@ def main(cfg: DictConfig):
                     curr_expl = explicit_seq[:, ctx_idx]
                     curr_ctx = context_seq[:, ctx_idx]
                     
+                    # 【核心修复 3】：验证集同样对齐数据维度
+                    wind_expl = curr_ctx.unsqueeze(1)
+                    combined_expl = torch.cat([curr_expl, wind_expl], dim=1)
+                    dummy_ctx = torch.ones(x_seq.shape[0], 1, device=device)
+                    
                     with amp.autocast('cuda'):
-                        # 【核心修改】：接收 4 个返回值，提取速度预测值
                         pred_v_norm, _, _, _ = model(
-                            curr_x_hist, curr_v_hist, curr_expl, curr_ctx, 
+                            curr_x_hist, curr_v_hist, combined_expl, dummy_ctx, 
                             vel_std=vel_std, pos_mean=pos_mean, pos_std=pos_std
                         )
                     pred_v_norm = pred_v_norm.float()
