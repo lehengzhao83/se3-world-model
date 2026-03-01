@@ -118,6 +118,11 @@ def make_rollout_video(checkpoint_path: str, save_path: str = "assets/simulation
 
     frames = 60
     print("Running autoregressive rollout...")
+    
+    # 【新增核心逻辑 1】：获取预热结束时物体真实的绝对旋转矩阵和质心位置
+    current_R = mat_curr[:3, :3]  # [3, 3] 真实物理旋转矩阵
+    current_center_real = mat_curr[:3, 3]  # [3] 真实物理质心位置
+    
     for _ in range(frames):
         sub_steps = 5
         
@@ -130,21 +135,33 @@ def make_rollout_video(checkpoint_path: str, save_path: str = "assets/simulation
         gt_trajectory.append(pts_new) 
         
         with torch.no_grad():
-            # 同样向模型传入物理量纲参数
-            pred_v_norm, _ = model(
+            # 【新增核心逻辑 2】：接收模型新返回的质心速度 (next_v_cm_norm) 和 旋转增量矩阵 (R_pred)
+            pred_v_norm, _, next_v_cm_norm, R_pred = model(
                 curr_x_hist, curr_v_hist, explicit_input, context_input, 
                 vel_std=vel_std, pos_mean=pos_mean, pos_std=pos_std
             )
             
-            last_x_norm = curr_x_hist[:, -1] 
-            pred_v_real = pred_v_norm * vel_std 
-            pred_x_norm = last_x_norm + pred_v_real / pos_std
+            # 将网络输出转为真实物理尺度
+            # next_v_cm_norm 的 shape 是 [B, 1, 3]，我们需要它的 numpy 数组并降维
+            v_cm_real = (next_v_cm_norm * vel_std).cpu().numpy().squeeze()  # [3]
+            R_mat = R_pred.cpu().numpy().squeeze()  # [3, 3]
             
+            # 【新增核心逻辑 3】：更新全局的绝对刚体位姿，完全隔绝离散点上的速度误差累积
+            current_center_real += v_cm_real
+            current_R = R_mat @ current_R  # 矩阵乘法累加旋转
+            
+            # 重新通过 canonical_points 乘以当前 Pose 生成点云，100% 绝对刚性！
+            pred_pts_real = (current_R @ canonical_points.T).T + current_center_real
+            pred_trajectory.append(pred_pts_real)
+            
+            # 将绝对刚体点云转换回归一化张量，准备喂给下一帧
+            pred_x_norm = (torch.tensor(pred_pts_real).float().to(device).unsqueeze(0) - pos_mean) / pos_std
+            # 计算点级别的伪速度供网络提取特征
+            pred_v_norm_step = pred_x_norm - curr_x_hist[:, -1]
+            
+            # 更新历史 buffer
             curr_x_hist = torch.cat([curr_x_hist[:, 1:], pred_x_norm.unsqueeze(1)], dim=1)
-            curr_v_hist = torch.cat([curr_v_hist[:, 1:], pred_v_norm.unsqueeze(1)], dim=1)
-            
-            pred_real = pred_x_norm * pos_std + pos_mean
-            pred_trajectory.append(pred_real.squeeze(0).cpu().numpy())
+            curr_v_hist = torch.cat([curr_v_hist[:, 1:], pred_v_norm_step.unsqueeze(1)], dim=1)
 
     print(f"Rendering video to {save_path}...")
     fig = plt.figure(figsize=(10, 8))
